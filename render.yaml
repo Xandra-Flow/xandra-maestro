@@ -1,0 +1,23 @@
+# إعدادات Render.com للبوت
+# ضع هذا الملف في جذر GitHub Repo
+
+services:
+  - type: web
+    name: xandra-maestro-bot
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r bot/requirements.txt
+    startCommand: gunicorn bot.telegram_bot:app --worker-class gevent --workers 1 --timeout 60
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_CHAT_ID
+        sync: false
+      - key: HF_REPO
+        sync: false
+      - key: HF_TOKEN_OWNER
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"

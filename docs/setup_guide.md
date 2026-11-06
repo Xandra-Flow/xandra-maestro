@@ -1,343 +1,303 @@
-# 📖 دليل الإعداد الكامل - مشروع Xandra Hope
+# 📖 دليل الإعداد الكامل - الإصدار 2.0
 
-## 🎯 ما الذي ستبنيه؟
+## 🎯 ماذا سنبني؟
 
-نظام كامل لتدريب نموذج Xandra Hope عبر:
-- **Hugging Face ZeroGPU**: GPU مجاني عبر API
-- **GitHub Actions**: منسّق يشتغل كل ساعة
-- **Telegram Bot**: بوت للأصدقاء للانضمام
-- **Cloudflare**: استضافة الواجهة + R2 + D1
+نظام تدريب **شبه آلي** مجاني بالكامل:
+
+```
+أنت (5 دقائق يومياً) → Kaggle → HF → GitHub Actions → Telegram Bot → أنت
+```
 
 ---
 
 ## 📋 المتطلبات
 
-- حساب GitHub (لديك بالفعل)
-- حساب Hugging Face (لديك بالفعل)
-- حساب Telegram (لديك بالفعل)
-- نطاق على Cloudflare (لديك بالفعل)
+- ✅ حساب GitHub
+- ✅ حساب Hugging Face
+- ✅ حساب Kaggle
+- ✅ حساب Telegram
+- ✅ حساب Render.com (سنسجّل مجاناً)
 
 ---
 
-## 🚀 الخطوة 1: إنشاء HF Spaces (الأهم)
+## 🚀 الخطوات بالتفصيل
 
-### 1.1 إنشاء Space للتدريب
+### الخطوة 1: إنشاء GitHub Repo (5 دقائق)
 
-```
-1. اذهب إلى: https://huggingface.co/new-space
-2. املأ البيانات:
-   - Owner: your-username
-   - Space name: xandra-trainer
-   - License: Apache 2.0
-   - SDK: Gradio
-   - Hardware: ZeroGPU (مهم!)
-   - Visibility: Private (أنت فقط)
-3. اضغط "Create Space"
-```
-
-### 1.2 رفع الكود للـ Space
-
-```bash
-# استنساخ الـ Space
-git clone https://huggingface.co/spaces/your-username/xandra-trainer
-cd xandra-trainer
-
-# نسخ الملفات من مجلد space/ في مشروعنا
-cp /path/to/xandra-system/space/app.py .
-cp /path/to/xandra-system/space/requirements.txt .
-cp /path/to/xandra-system/space/README.md .
-
-# رفع الكود
-git add .
-git commit -m "Initial Xandra Trainer"
-git push
-```
-
-### 1.3 إنشاء مستودع لحفظ Checkpoints
-
-```
-1. اذهب إلى: https://huggingface.co/new-model
-2. املأ:
-   - Owner: your-username
-   - Name: xandra-training-state
-   - License: Apache 2.0
-   - Visibility: Private
-3. اضغط "Create Model"
-```
-
----
-
-## 🚀 الخطوة 2: إنشاء Telegram Bot
-
-### 2.1 إنشاء البوت
-
-```
-1. افتح تيليجرام، ابحث عن: @BotFather
-2. أرسل: /newbot
-3. اختر اسماً: Xandra Maestro
-4. اختر username: xandra_maestro_bot (أو أي اسم متاح)
-5. احفظ الـ Token (يبدأ بـ أرقام:نص)
-```
-
-### 2.2 الحصول على Chat ID الخاص بك
-
-```
-1. ابحث عن: @userinfobot
-2. أرسل: /start
-3. احفظ الـ "Id:" (مثلاً: 123456789)
-```
-
----
-
-## 🚀 الخطوة 3: إنشاء GitHub Repo
-
-### 3.1 إنشاء المستودع
-
-```
 1. اذهب إلى: https://github.com/new
 2. املأ:
-   - Repository name: xandra-maestro
-   - Visibility: Private (مهم!)
-   - Add README: ✅
-3. اضغط "Create repository"
-```
+   - **Repository name:** `xandra-maestro`
+   - **Visibility:** ✅ **Private** (مهم!)
+   - **Add README:** ✅
+3. اضغط **"Create repository"**
 
-### 3.2 رفع الكود
+### الخطوة 2: رفع ملفات المشروع (10 دقائق)
 
-```bash
-# استنساخ
-git clone https://github.com/your-username/xandra-maestro
-cd xandra-maestro
+1. استخرج `xandra-system-v2/` على جهازك
+2. ارفع كل الملفات إلى GitHub Repo:
+   - عبر المتصفح: اسحب وأفلت
+   - أو عبر Git:
+     ```bash
+     git clone https://github.com/YOUR_USERNAME/xandra-maestro.git
+     cp -r xandra-system-v2/* xandra-maestro/
+     cd xandra-maestro
+     git add .
+     git commit -m "Initial commit - Xandra v2.0"
+     git push
+     ```
 
-# نسخ الملفات
-cp -r /path/to/xandra-system/* .
+### الخطوة 3: إنشاء HF Model Repo (5 دقائق)
 
-# رفع
-git add .
-git commit -m "Initial Maestro setup"
-git push
-```
-
----
-
-## 🚀 الخطوة 4: إعداد GitHub Secrets
-
-اذهب إلى: `GitHub Repo → Settings → Secrets and variables → Actions`
-
-أضف الـ Secrets التالية:
-
-| Secret Name | القيمة | من أين؟ |
-|---|---|---|
-| `HF_REPO` | `your-username/xandra-training-state` | اسم مستودع HF |
-| `HF_TOKEN_OWNER` | `hf_xxx...` | HF Settings → Tokens (Full access) |
-| `ZERO_GPU_SPACE` | `your-username/xandra-trainer` | اسم الـ Space |
-| `TELEGRAM_BOT_TOKEN` | `123456:ABC-xxx...` | من BotFather |
-| `OWNER_CHAT_ID` | `123456789` | من @userinfobot |
-| `GITHUB_TOKEN` | `ghp_xxx...` | GitHub Settings → Developer → Tokens |
-| `GITHUB_REPO` | `your-username/xandra-maestro` | اسم الـ Repo |
-
----
-
-## 🚀 الخطوة 5: استضافة البوت
-
-البوت يحتاج خادم يعمل 24/7. الخيارات المجانية:
-
-### الخيار A: على HF Spaces (موصى به)
-
-```
-1. اذهب إلى: https://huggingface.co/new-space
+1. اذهب إلى: https://huggingface.co/new-model
 2. املأ:
-   - Space name: xandra-bot
-   - SDK: Docker
-   - Hardware: CPU basic (Free)
-   - Visibility: Private
-3. اضغط "Create Space"
-4. ارفع الكود من bot/telegram_bot.py
-```
+   - **Owner:** حسابك
+   - **Name:** `xandra-training-state`
+   - **License:** `Apache 2.0`
+   - **Visibility:** ✅ **Private**
+3. اضغط **"Create model"**
 
-### الخيار B: على Cloudflare Workers
+### الخطوة 4: إنشاء HF Token (3 دقائق)
 
-```javascript
-// worker.js
-export default {
-  async fetch(request, env) {
-    // محاكاة polling للبوت
-    const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/getUpdates`;
-    const response = await fetch(url);
-    const data = await response.json();
-    
-    // معالجة الرسائل
-    for (const update of data.result || []) {
-      await handleMessage(update.message, env);
-    }
-    
-    return new Response("OK");
-  }
-};
-```
+1. اذهب إلى: https://huggingface.co/settings/tokens
+2. اضغط **"Create new token"**
+3. املأ:
+   - **Name:** `xandra_owner`
+   - **Token type:** **"Write"** (مهم!)
+4. اضغط Create
+5. احفظ الـ Token (يبدأ بـ `hf_...`)
 
-### الخيار C: على جهازك (مؤقتاً)
+### الخطوة 5: إنشاء Telegram Bot (5 دقائق)
 
-```bash
-# على جهازك
-export TELEGRAM_BOT_TOKEN="..."
-export GITHUB_TOKEN="..."
-export GITHUB_REPO="your-username/xandra-maestro"
-export OWNER_CHAT_ID="..."
-
-python bot/telegram_bot.py
-```
-
----
-
-## 🚀 الخطوة 6: التحقق من العمل
-
-### 6.1 اختبر البوت
-
-```
 1. افتح تيليجرام
-2. ابحث عن البوت الخاص بك
-3. أرسل: /start
-4. يجب أن ترى رسالة الترحيب
-5. أرسل: /join
-6. اتبع التعليمات
-```
+2. ابحث عن: **@BotFather**
+3. أرسل: `/newbot`
+4. اختر اسماً: `Xandra Maestro`
+5. اختر username: `xandra_maestro_bot`
+6. احفظ الـ **Bot Token** (مثال: `123456:ABC-DEF1234...`)
 
-### 6.2 اختبر الـ Space
+#### الحصول على Chat ID الخاص بك:
+
+1. ابحث عن: **@userinfobot**
+2. أرسل: `/start`
+3. احفظ الـ **Id** (مثال: `123456789`)
+
+### الخطوة 6: إنشاء GitHub Token (5 دقائق)
+
+1. اذهب إلى: https://github.com/settings/tokens
+2. اضغط **"Generate new token (classic)"**
+3. املأ:
+   - **Note:** `xandra_maestro`
+   - **Expiration:** `90 days`
+   - **Scopes:** ✅ `repo` (كامل)
+4. اضغط **"Generate token"**
+5. احفظ الـ Token (يبدأ بـ `ghp_...`)
+
+### الخطوة 7: إعداد GitHub Secrets (10 دقائق)
+
+اذهب إلى: `GitHub Repo → Settings → Secrets and variables → Actions → New repository secret`
+
+أضف الـ 5 Secrets التالية بالضبط:
+
+| Secret Name | القيمة |
+|---|---|
+| `HF_REPO` | `your-username/xandra-training-state` |
+| `HF_TOKEN_OWNER` | `hf_xxxxxxxxxxxxxxxx` |
+| `TELEGRAM_BOT_TOKEN` | `123456:ABC-DEF1234...` |
+| `OWNER_CHAT_ID` | `123456789` |
+| `GITHUB_TOKEN` | `ghp_xxxxxxxxxxxxxxxx` |
+
+### الخطوة 8: إنشاء حساب Render.com (5 دقائق)
+
+1. اذهب إلى: https://render.com/
+2. اضغط **"Sign Up"**
+3. سجّل بـ GitHub (الأسهل)
+4. أكّد الإيميل
+
+### الخطوة 9: نشر البوت على Render (15 دقيقة)
+
+#### الطريقة A: عبر render.yaml (الأسهل)
+
+1. اذهب إلى: https://dashboard.render.com
+2. اضغط **"New +"** → **"Blueprint"**
+3. اختر GitHub Repo: `xandra-maestro`
+4. Render سيقرأ `render.yaml` تلقائياً
+5. سيطلب منك إدخال قيم الـ envVars:
+   - `TELEGRAM_BOT_TOKEN`: (القيمة من الخطوة 5)
+   - `OWNER_CHAT_ID`: (القيمة من الخطوة 5)
+   - `HF_REPO`: `your-username/xandra-training-state`
+   - `HF_TOKEN_OWNER`: (القيمة من الخطوة 4)
+6. اضغط **"Apply"**
+7. انتظر 2-3 دقائق حتى يبني Render الـ service
+8. ستحصل على URL مثل: `https://xandra-maestro-bot.onrender.com`
+
+#### الطريقة B: عبر الـ Dashboard
+
+1. اذهب إلى: https://dashboard.render.com
+2. اضغط **"New +"** → **"Web Service"**
+3. اختر GitHub Repo: `xandra-maestro`
+4. املأ:
+   - **Name:** `xandra-maestro-bot`
+   - **Runtime:** `Python 3`
+   - **Build Command:** `pip install -r bot/requirements.txt`
+   - **Start Command:** `gunicorn bot.telegram_bot:app --worker-class gevent --workers 1 --timeout 60`
+   - **Plan:** `Free`
+5. في **Environment Variables**، أضف:
+   - `TELEGRAM_BOT_TOKEN` = (القيمة)
+   - `OWNER_CHAT_ID` = (القيمة)
+   - `HF_REPO` = `your-username/xandra-training-state`
+   - `HF_TOKEN_OWNER` = (القيمة)
+6. اضغط **"Create Web Service"**
+7. انتظر حتى يصبح Status: `Live`
+
+### الخطوة 10: ضبط Telegram Webhook (2 دقيقة)
+
+بعد أن يصبح البوت `Live` على Render:
+
+1. افتح الرابط في المتصفح:
+   ```
+   https://xandra-maestro-bot.onrender.com/set_webhook
+   ```
+   (استبدل `xandra-maestro-bot` باسم service الخاص بك)
+
+2. يجب أن ترى:
+   ```
+   ✅ تم ضبط Webhook: https://xandra-maestro-bot.onrender.com/webhook/xxx
+   ```
+
+### الخطوة 11: اختبار البوت (3 دقائق)
+
+1. افتح تيليجرام
+2. ابحث عن: `@xandra_maestro_bot`
+3. أرسل: `/start`
+4. يجب أن تتلقى رسالة الترحيب
+5. أرسل: `/status`
+6. يجب أن ترى حالة التدريب (سيكون 0 خطوة في البداية)
+
+### الخطوة 12: رفع Notebook على Kaggle (10 دقائق)
+
+1. اذهب إلى: https://www.kaggle.com/code
+2. اضغط **"New Notebook"**
+3. اضبط الإعدادات:
+   - **Accelerator:** `GPU T4 x2`
+   - **Internet:** `On`
+4. اذهب إلى: **File → Import Notebook**
+5. ارفع ملف: `kaggle/xandra_worker.ipynb`
+6. احفظ الـ Notebook باسم: `xandra_worker`
+
+### الخطوة 13: إعداد Kaggle Secrets (3 دقائق)
+
+1. في Kaggle Notebook، اذهب إلى: **Add-ons → Secrets → Add Secret**
+2. أضف Secretين:
+   - **Name:** `HF_TOKEN` | **Value:** (نفس HF_TOKEN_OWNER)
+   - **Name:** `HF_REPO` | **Value:** `your-username/xandra-training-state`
+
+### الخطوة 14: أول تشغيل تجريبي (5 دقائق)
+
+1. افتح `xandra_worker.ipynb` على Kaggle
+2. اضغط **Run All** (Ctrl+F9)
+3. انتظر دقائق حتى يبدأ التدريب
+4. ستظهر رسائل مثل:
+   ```
+   ✅ تم بناء نموذج Xandra-Tiny
+   📊 عدد الباراميترات: 3,xxx,xxx
+   🚀 بدء التدريب من الخطوة 0
+   ```
+5. اغلق المتصفح (سيستمر Notebook بالعمل 12 ساعة)
+
+### الخطوة 15: التحقق من النتائج (بعد ساعة)
+
+1. اذهب إلى: https://huggingface.co/your-username/xandra-training-state
+2. تحقق من وجود:
+   - `state.json`
+   - `checkpoints/latest.pt`
+3. على تيليجرام، أرسل `/status` للبوت
+4. يجب أن ترى الخطوة الحالية
+
+---
+
+## ✅ Checklist للتتبع
+
+انقل هذا الجدول وتابع تقدمك:
 
 ```
-1. اذهب إلى: https://huggingface.co/spaces/your-username/xandra-trainer
-2. اضغط "Submit"
-3. يجب أن ترى نتائج التدريب
-```
-
-### 6.3 اختبر GitHub Actions
-
-```
-1. اذهب إلى GitHub Repo → Actions
-2. اضغط على "Xandra Maestro"
-3. اضغط "Run workflow"
-4. انتظر النتيجة
+□ 1. إنشاء GitHub Repo (xandra-maestro)
+□ 2. رفع ملفات المشروع لـ GitHub
+□ 3. إنشاء HF Model Repo (xandra-training-state)
+□ 4. إنشاء HF Token (Write)
+□ 5. إنشاء Telegram Bot (@BotFather)
+□ 6. الحصول على Chat ID (@userinfobot)
+□ 7. إنشاء GitHub Token
+□ 8. إعداد 5 GitHub Secrets
+□ 9. إنشاء حساب Render.com
+□ 10. نشر البوت على Render (render.yaml)
+□ 11. ضبط Telegram Webhook
+□ 12. اختبار البوت (/start, /status)
+□ 13. رفع Notebook على Kaggle
+□ 14. إعداد Kaggle Secrets
+□ 15. أول تشغيل تجريبي
+□ 16. التحقق من النتائج على HF
 ```
 
 ---
 
-## 🎯 كيف يبدأ الأصدقاء؟
+## 🎯 ملاحظات مهمة
 
-### أرسل لكل صديق:
+### ملاحظة 1: حدود Render.com Free
+- ينام بعد 15 دقيقة خمول
+- يستيقظ تلقائياً عند استقبال رسالة (Webhook)
+- 750 ساعة شهرياً (يكفي لـ 1 service)
 
-```
-مرحباً! أحتاج مساعدتك في مشروع تقني.
-سيستغرق منك 5 دقائق فقط، ولن تحتاج لفعل أي شيء بعدها.
+### ملاحظة 2: حدود Kaggle
+- 30 ساعة GPU أسبوعياً
+- 12 ساعة كحد أقصى للجلسة
+- يتجدد يوم الاثنين
 
-1. اذهب إلى: https://huggingface.co/join
-2. سجّل بحساب Google
-3. اذهب إلى: https://huggingface.co/settings/tokens
-4. اضغط "Create new token"
-5. الاسم: xandra | النوع: Read
-6. اضغط Create، انسخ الـ Token
-7. افتح تيليجرام، ابحث عن: @xandra_maestro_bot
-8. أرسل /join، ثم الصق الـ Token
+### ملاحظة 3: GitHub Actions
+- 2000 دقيقة شهرياً مجاناً
+- الـ Maestro يستخدم ~10 دقائق/ساعة = ~720 دقيقة/شهر
+- كافٍ تماماً
 
-انتهى! شكراً لك 🙏
-```
-
----
-
-## 🎯 كيف تشاهد التقدم؟
-
-### على تيليجرام (البوت سيخبرك):
-
-```
-🎉 صديق جديد انضم!
-🆔 friend-123456789
-👤 HF: ahmed_username
-
-🚀 أطلقت مهمة على friend-123456789
-📊 الخطوة الحالية: 0
-
-✅ اكتملت جلسة friend-123456789
-📈 الخطوة: 500/500000
-📉 الخسارة: 4.234
-⚡ خطوات الجلسة: 500
-📊 نسبة الإنجاز: 0.10%
-```
-
-### على GitHub Actions:
-
-```
-GitHub Repo → Actions → Xandra Maestro
-شاهد كل تشغيل ونتيجته
-```
-
-### على Hugging Face:
-
-```
-https://huggingface.co/your-username/xandra-training-state
-- state.json: آخر حالة
-- checkpoints/: ملفات الـ checkpoints
-- training_logs/: سجلات التدريب
-```
+### ملاحظة 4: Hugging Face
+- Model Repo مجاني
+- حجم غير محدود (عملياً)
+- Read/Write مجاني للـ private repos
 
 ---
 
-## ⚠️ مشاكل شائعة وحلولها
+## ❓ المشاكل الشائعة وحلولها
 
-### 1. ZeroGPU لا يعمل
+### المشكلة: البوت لا يستجيب
+**الحل:**
+1. تأكد أن Render service `Live` وليس `Suspended`
+2. اضغط على الرابط: `https://your-app.onrender.com/health`
+3. لو لم يعمل، شغّل `/set_webhook` مرة أخرى
 
-```
-السبب: الحساب المجاني لا يملك صلاحية ZeroGPU
-الحل:
-  - ترقية الحساب إلى PRO ($9/شهر)
-  - أو الانتظار (الحصص تتجدد يومياً)
-  - أو الاعتماد على أصدقاء أكثر
-```
+### المشكلة: Kaggle Notebook فشل
+**الحل:**
+1. تأكد أن GPU مفعّل
+2. تأكد أن Internet مفعّل
+3. تأكد أن Secrets صحيحة
+4. راجع الأخطاء في الـ Output
 
-### 2. البوت لا يستجيب
+### المشكلة: GitHub Actions لا يعمل
+**الحل:**
+1. اذهب إلى Actions → آخر تشغيل
+2. شوف الـ logs
+3. تأكد أن كل Secrets موجودة وصحيحة
 
-```
-السبب: البوت لا يعمل 24/7
-الحل:
-  - انشر البوت على HF Space (CPU مجاني)
-  - أو Cloudflare Workers
-```
-
-### 3. GitHub Actions يفشل
-
-```
-السبب: Secrets غير مكتملة
-الحل: تأكد من جميع Secrets في الخطوة 4
-```
-
-### 4. الأصدقاء لا يستطيعون الانضمام
-
-```
-السبب: البوت خاص (Private)
-الحل: اعرض رابط دعوة مباشر:
-t.me/xandra_maestro_bot?start=join
-```
+### المشكلة: لا يصل تنبيه تيليجرام
+**الحل:**
+1. أرسل `/start` للبوت أولاً
+2. تأكد أن OWNER_CHAT_ID صحيح
+3. تأكد أن TELEGRAM_BOT_TOKEN صحيح
 
 ---
 
-## 📞 الخطوات التالية بعد الإعداد
+## 📞 الدعم
 
-1. **اختبر وحدك أولاً** (شغّل Maestro، شوف التدريب يشتغل)
-2. **ادعو 1-2 صديق** للاختبار
-3. **بعد النجاح**، ادعو المزيد
-4. **راقب التقدم** على تيليجرام
-5. **بعد 1000 خطوة**، قيّم النموذج
-6. **بعد 50000 خطوة**، ابدأ في النشر
+لو واجهت أي مشكلة:
+1. أرسل لي رسالة
+2. اذكر الخطوة التي وصلت لها
+3. أرفق لقطة شاشة للخطأ (إن وجد)
 
----
-
-## 🎉 مبروك!
-
-عند إتمام هذه الخطوات، لديك نظام كامل:
-- ✅ بوت تيليجرام للأصدقاء
-- ✅ Space ZeroGPU للتدريب
-- ✅ Maestro على GitHub Actions
-- ✅ تخزين على Hugging Face
-- ✅ إشعارات تلقائية
-
-التكلفة: $0
-الزمن المطلوب لإكمال الإعداد: ~2-3 ساعات
+سأساعدك فوراً.

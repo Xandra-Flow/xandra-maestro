@@ -1,627 +1,274 @@
 """
-Xandra Maestro Bot - بوت تيليجرام المُحدّث
-==========================================
-يستقبل طلبات الانضمام، يتحقق منها، يسجلها
-يرسل تنبيهات للمالك عند:
-  - إضافة صديق جديد
-  - مغادرة صديق
-  - فشل في التحقق من Token
-  - أي خطأ في النظام
+Xandra Telegram Bot - الإصدار 2.0 (Render.com)
+================================================
+يعمل على Render.com Free Tier
+يدعم: /start, /status, /progress, /chat, /test_model, /help
 
-المميزات:
-- /start: ترحيب
-- /join: تسجيل صديق جديد (يطلب Token)
-- /status: حالة الصديق
-- /leave: حذف الصديق من النظام
-- /help: المساعدة
-- /workers: قائمة كل الأصدقاء (للمالك فقط)
-- /alerts: تفعيل/إيقاف التنبيهات (للمالك فقط)
+مميزات خاصة بـ Render:
+- يستخدم Webhook بدلاً من polling (أكثر كفاءة)
+- يبقى نائماً ويستيقظ عند الرسائل
+- يحفظ state في ملف محلي (Render persistent disk)
 """
 
 import os
 import json
 import logging
-import traceback
 import requests
+from flask import Flask, request, jsonify
+from huggingface_hub import hf_hub_download
 import telebot
-from datetime import datetime
-import yaml
 
 # ====== الإعدادات ======
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/xandra-maestro")
 HF_REPO = os.environ.get("HF_REPO", "your-username/xandra-training-state")
+HF_TOKEN = os.environ.get("HF_TOKEN_OWNER")
 OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))
-ALERTS_ENABLED = os.environ.get("ALERTS_ENABLED", "true").lower() == "true"
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
-# ====== نظام التسجيل (Logging) ======
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('xandra_bot.log'),
-        logging.StreamHandler()
-    ]
-)
+# ====== التسجيل ======
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# التحقق من الإعدادات
-if not BOT_TOKEN:
-    logger.error("❌ TELEGRAM_BOT_TOKEN غير موجود!")
-    exit(1)
-
+# ====== Flask App ======
+app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# قائمة انتظار لتتبع من أرسل /join
-waiting_for_token = {}
-
-# ====== نظام التنبيهات ======
-def send_alert_to_owner(message, level="info"):
-    """
-    إرسال تنبيه للمالك
-    
-    Args:
-        message: نص الرسالة
-        level: info, success, warning, error
-    """
-    if not OWNER_CHAT_ID or not ALERTS_ENABLED:
-        logger.info(f"📨 تنبيه ({level}): {message}")
-        return
-    
-    emojis = {
-        "info": "ℹ️",
-        "success": "✅",
-        "warning": "⚠️",
-        "error": "🚨"
-    }
-    emoji = emojis.get(level, "ℹ️")
-    
-    text = f"🎵 Xandra Maestro Alert:\n{emoji} {message}"
-    
+# ====== قراءة state من HF ======
+def get_training_state():
+    """قراءة آخر حالة تدريب من HF"""
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": OWNER_CHAT_ID,
-                "text": text,
-                "parse_mode": "Markdown"
-            },
-            timeout=10
+        path = hf_hub_download(
+            repo_id=HF_REPO,
+            filename="state.json",
+            repo_type="model",
+            token=HF_TOKEN
         )
-        logger.info(f"✅ تم إرسال تنبيه ({level}) للمالك")
+        with open(path) as f:
+            return json.load(f)
     except Exception as e:
-        logger.error(f"❌ فشل إرسال التنبيه: {e}")
-
-# ====== التحقق من Token عبر HF API ======
-def verify_hf_token(token):
-    """
-    يتحقق أن الـ Token صالح عبر استدعاء HF API
-    ويتأكد أن صلاحياته Read فقط
-    """
-    try:
-        response = requests.get(
-            "https://huggingface.co/api/whoami-v2",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            # التحقق من صلاحيات الـ Token
-            # (لا يمكننا معرفة الصلاحيات الدقيقة من whoami، لكن نتأكد من صحته)
-            return {
-                "valid": True,
-                "username": data.get("name", "unknown"),
-                "fullname": data.get("fullname", ""),
-                "orgs": [org.get("name") for org in data.get("orgs", [])]
-            }
-        elif response.status_code == 401:
-            return {"valid": False, "error": "Token غير صحيح أو منتهي الصلاحية"}
-        else:
-            return {"valid": False, "error": f"خطأ من HF: Status {response.status_code}"}
-            
-    except requests.exceptions.Timeout:
-        return {"valid": False, "error": "انتهى وقت الاتصال بـ Hugging Face"}
-    except Exception as e:
-        return {"valid": False, "error": f"خطأ غير متوقع: {str(e)}"}
-
-# ====== تسجيل Worker جديد في GitHub ======
-def register_worker_in_github(worker_id, hf_username, hf_token, telegram_user_id, telegram_username=None):
-    """يضيف Worker جديد إلى GitHub Secrets + workers_config.yaml"""
-    try:
-        from github import Github
-        
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(GITHUB_REPO)
-        
-        # 1. إضافة الـ Token إلى GitHub Secrets
-        secret_name = f"HF_TOKEN_{worker_id.upper()}"
-        repo.create_secret(secret_name, hf_token)
-        logger.info(f"✅ تم إضافة Secret: {secret_name}")
-        
-        # 2. تحديث workers_config.yaml
-        try:
-            contents = repo.get_contents("maestro/workers_config.yaml")
-            config = yaml.safe_load(contents.decoded_content.decode())
-        except Exception as e:
-            logger.warning(f"⚠️ لم يتم العثور على workers_config.yaml: {e}")
-            config = {"workers": []}
-        
-        new_worker = {
-            'id': worker_id,
-            'service': 'hf_zerogpu',
-            'enabled': True,
-            'hf_username': hf_username,
-            'token_secret': secret_name,
-            'telegram_user_id': telegram_user_id,
-            'telegram_username': telegram_username,
-            'added_at': datetime.now().isoformat(),
-            'total_steps_trained': 0,
-            'total_sessions': 0,
-            'status': 'active'
+        logger.warning(f"⚠️ لا توجد حالة: {e}")
+        return {
+            "current_step": 0,
+            "target_steps": 500000,
+            "current_loss": None,
+            "history": [],
+            "best_loss": float('inf')
         }
-        config['workers'].append(new_worker)
-        
-        new_content = yaml.dump(config, default_flow_style=False, allow_unicode=True)
-        repo.update_file(
-            "maestro/workers_config.yaml",
-            f"Add worker: {worker_id}",
-            new_content,
-            contents.sha
-        )
-        logger.info(f"✅ تم تحديث workers_config.yaml")
-        
-        return True, None
-        
-    except Exception as e:
-        error_msg = f"فشل تسجيل Worker في GitHub: {str(e)}\n{traceback.format_exc()}"
-        logger.error(error_msg)
-        return False, error_msg
-
-# ====== حذف Worker من النظام ======
-def remove_worker_from_github(telegram_user_id):
-    """حذف Worker من GitHub Secrets + workers_config.yaml"""
-    try:
-        from github import Github
-        
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(GITHUB_REPO)
-        
-        # قراءة workers_config.yaml
-        contents = repo.get_contents("maestro/workers_config.yaml")
-        config = yaml.safe_load(contents.decoded_content.decode())
-        
-        # العثور على الـ Worker وحذفه
-        worker_to_remove = None
-        for w in config['workers']:
-            if w.get('telegram_user_id') == telegram_user_id:
-                worker_to_remove = w
-                break
-        
-        if not worker_to_remove:
-            return False, "لم يتم العثور على الـ Worker"
-        
-        # حذف Secret من GitHub
-        try:
-            repo.delete_secret(worker_to_remove['token_secret'])
-        except:
-            pass  # Secret قد لا يكون موجوداً
-        
-        # حذف Worker من config
-        config['workers'] = [
-            w for w in config['workers']
-            if w.get('telegram_user_id') != telegram_user_id
-        ]
-        
-        new_content = yaml.dump(config, default_flow_style=False, allow_unicode=True)
-        repo.update_file(
-            "maestro/workers_config.yaml",
-            f"Remove worker: {worker_to_remove['id']}",
-            new_content,
-            contents.sha
-        )
-        
-        return True, worker_to_remove['id']
-        
-    except Exception as e:
-        error_msg = f"فشل حذف Worker: {str(e)}"
-        logger.error(error_msg)
-        return False, error_msg
 
 # ====== الأوامر ======
 
 @bot.message_handler(commands=['start'])
 def welcome(message):
-    """ترحيب المستخدم"""
+    """ترحيب"""
     user_name = message.from_user.first_name or "صديقي"
-    is_owner = message.from_user.id == OWNER_CHAT_ID
-    
     text = f"""
 🌟 مرحباً {user_name}!
 
-أنا البوت الرسمي لمشروع Xandra - نموذج الذكاء الاصطناعي العربي.
+أنا البوت الرسمي لمشروع Xandra Hope.
 
-📌 البوت الرسمي: @xandra_maestro_bot
+📌 البوت: @xandra_maestro_bot
 
-للانضمام كـ "Worker" (مساهم بصمت):
-أرسل: /join
+الأوامر المتاحة:
+/status - حالة التدريب الحالية
+/progress - تقرير التقدم
+/help - المساعدة
 
-للاطلاع على حالتك:
-أرسل: /status
-
-للمغادرة وحذف بياناتك:
-أرسل: /leave
-
-للمساعدة:
-أرسل: /help
-"""
-    if is_owner:
-        text += """
-👑 أوامر المالك فقط:
-/workers - عرض كل الأصدقاء المسجلين
-/alerts - تفعيل/إيقاف التنبيهات
-/test_alert - اختبار التنبيهات
+💡 تذكير: شغّل Notebook على Kaggle يومياً!
 """
     bot.reply_to(message, text)
-
-@bot.message_handler(commands=['join'])
-def join(message):
-    """بدء عملية التسجيل"""
-    user_id = message.from_user.id
-    waiting_for_token[user_id] = {
-        "started_at": datetime.now().isoformat(),
-        "username": message.from_user.username
-    }
-    
-    text = """
-📝 رائع! لتسجيلك في النظام:
-
-1️⃣ اذهب إلى: https://huggingface.co/join
-   (لو ليس لديك حساب، سجّل بـ Google)
-
-2️⃣ اذهب إلى: https://huggingface.co/settings/tokens
-   واضغط "Create new token"
-
-3️⃣ اختر:
-   - Name: xandra
-   - Token type: Fine-grained ⭐ (موصى به)
-   
-   ثم فعّل فقط:
-   ✅ Repositories → Read access to contents of all repos
-   ✅ User → Inference → Make calls to inference endpoints
-   
-   (أو ببساطة: اختر "Write" بدلاً من Fine-grained)
-
-4️⃣ اضغط Create token
-   انسخ الـ Token (يبدأ بـ hf_)
-
-5️⃣ أرسله لي هنا الآن (الصق الـ Token فقط)
-
-⚠️ ملاحظات:
-- نحتاج صلاحية Write (أو Fine-grained مع Inference) لاستدعاء ZeroGPU API
-- Read فقط لا يكفي لاستدعاء الـ Space برمجياً
-- لا نستطيع التعديل على نماذجك، نستخدمه فقط للـ GPU المجاني
-- يمكنك حذفه في أي وقت من إعدادات HF
-"""
-    bot.reply_to(message, text)
-    
-    # تنبيه المالك أن شخصاً بدأ التسجيل
-    send_alert_to_owner(
-        f"📝 شخص جديد بدأ التسجيل\n"
-        f"👤 Telegram: @{message.from_user.username or 'N/A'}\n"
-        f"🆔 ID: {user_id}",
-        level="info"
-    )
 
 @bot.message_handler(commands=['status'])
 def status(message):
-    """عرض حالة المستخدم"""
-    user_id = message.from_user.id
+    """حالة التدريب"""
+    state = get_training_state()
     
-    try:
-        from github import Github
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(GITHUB_REPO)
-        contents = repo.get_contents("maestro/workers_config.yaml")
-        config = yaml.safe_load(contents.decoded_content.decode())
-        
-        worker = None
-        for w in config.get('workers', []):
-            if w.get('telegram_user_id') == user_id:
-                worker = w
-                break
-        
-        if worker:
-            text = f"""
-📊 حالتك في مشروع Xandra:
-
-🆔 معرّفك: {worker['id']}
-👤 حساب HF: {worker['hf_username']}
-✅ الحالة: {'نشط ✅' if worker.get('enabled', True) else 'موقوف ⏸️'}
-📈 جلسات التدريب: {worker.get('total_sessions', 0)}
-🎯 خطوات مدرّبة: {worker.get('total_steps_trained', 0)}
-📅 تاريخ الانضمام: {worker.get('added_at', 'غير معروف')[:10]}
-
-شكراً لمساهمتك! 🙏
-"""
+    progress = (state['current_step'] / state['target_steps']) * 100
+    steps_remaining = state['target_steps'] - state['current_step']
+    
+    # تقدير الوقت المتبقي
+    history = state.get('history', [])
+    if history and len(history) >= 2:
+        avg_steps_per_session = sum(h.get('steps_done', 0) for h in history[-7:]) / min(7, len(history))
+        if avg_steps_per_session > 0:
+            days_remaining = steps_remaining / avg_steps_per_session
+            time_estimate = f"~{int(days_remaining)} يوم"
         else:
-            text = "❌ أنت غير مسجل بعد.\nأرسل /join للتسجيل."
-    except Exception as e:
-        text = f"❌ خطأ في قراءة الحالة: {e}"
-        send_alert_to_owner(
-            f"❌ خطأ في قراءة حالة المستخدم {user_id}: {e}",
-            level="error"
+            time_estimate = "غير محدد"
+    else:
+        time_estimate = "غير محدد"
+    
+    text = f"""
+📊 *حالة تدريب Xandra Hope*
+
+📈 الخطوة الحالية: `{state['current_step']:,}`
+🎯 الهدف: `{state['target_steps']:,}`
+📊 نسبة الإنجاز: `{progress:.2f}%`
+📉 الخسارة الحالية: `{state.get('current_loss', 'N/A')}`
+🏆 أفضل خسارة: `{state.get('best_loss', 'N/A')}`
+⏳ الوقت المتبقي: `{time_estimate}`
+📅 آخر تحديث: `{state.get('last_updated', 'غير معروف')[:19]}`
+
+💡 لتشغيل جلسة تدريب:
+1. اذهب إلى Kaggle
+2. افتح Notebook: xandra_worker
+3. اضغط Run All
+"""
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['progress'])
+def progress(message):
+    """تقرير مفصل عن التقدم"""
+    state = get_training_state()
+    history = state.get('history', [])
+    
+    if not history:
+        bot.reply_to(message, "❌ لا يوجد سجل تدريب بعد.")
+        return
+    
+    # آخر 5 جلسات
+    recent = history[-5:]
+    
+    text = "📈 *آخر جلسات التدريب:*\n\n"
+    for h in reversed(recent):
+        text += (
+            f"📅 `{h.get('timestamp', 'N/A')[:19]}`\n"
+            f"   خطوة: `{h.get('final_step', 'N/A'):,}`\n"
+            f"   خسارة: `{h.get('final_loss', 'N/A'):.4f}`\n"
+            f"   خطوات اليوم: `{h.get('steps_done', 'N/A')}`\n\n"
         )
     
-    bot.reply_to(message, text)
-
-@bot.message_handler(commands=['leave'])
-def leave(message):
-    """حذف المستخدم من النظام"""
-    user_id = message.from_user.id
-    username = message.from_user.username or "غير معروف"
-    
-    bot.reply_to(message, 
-        "⏳ جاري حذف بياناتك..."
+    text += (
+        f"📊 *إجمالي:*\n"
+        f"   الخطوة الحالية: `{state['current_step']:,}`\n"
+        f"   نسبة الإنجاز: `{(state['current_step']/state['target_steps']*100):.2f}%`"
     )
     
-    success, result = remove_worker_from_github(user_id)
-    
-    if success:
-        text = f"""
-🚪 تم حذفك من النظام بنجاح.
-
-ما تم حذفه:
-- ✅ GitHub Secret الخاص بك
-- ✅ بياناتك من workers_config.yaml
-- 📝 Token في HF (احذفه يدوياً من إعداداتك)
-
-شكراً لك على مساهمتك السابقة! 🙏
-
-يمكنك العودة متى أردت: /join
-"""
-        bot.reply_to(message, text)
-        
-        # تنبيه المالك
-        send_alert_to_owner(
-            f"🚪 صديق غادر\n"
-            f"🆔 {result}\n"
-            f"👤 Telegram: @{username}\n"
-            f"📱 ID: {user_id}",
-            level="warning"
-        )
-    else:
-        bot.reply_to(message, 
-            f"❌ حدث خطأ أثناء الحذف: {result}\n"
-            f"تواصل مع الإدارة."
-        )
-        send_alert_to_owner(
-            f"❌ فشل حذف صديق\n"
-            f"📱 ID: {user_id}\n"
-            f"الخطأ: {result}",
-            level="error"
-        )
+    bot.reply_to(message, text, parse_mode="Markdown")
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
     """المساعدة"""
     text = """
-📚 المساعدة
+📚 *المساعدة - مشروع Xandra Hope*
 
-الأوامر المتاحة:
+🤖 *الأوامر:*
 /start - رسالة الترحيب
-/join - التسجيل في النظام
-/status - عرض حالتك
-/leave - المغادرة وحذف بياناتك
+/status - حالة التدريب الحالية
+/progress - آخر جلسات التدريب
 /help - هذه الرسالة
 
-لو واجهت مشكلة، تواصل مع من دعاك للمشروع.
+💡 *كيف أساهم في التدريب؟*
 
-المزيد من المساعدة: https://huggingface.co/docs
+1. اذهب إلى https://www.kaggle.com/
+2. افتح Notebook: `xandra_worker`
+3. اضغط **Run All** (Ctrl+F9)
+4. اغلق المتصفح بأمان
+5. سيعمل Notebook 12 ساعة تلقائياً
+
+📌 *النتيجة:*
+- ~500-1000 خطوة تدريب
+- حفظ checkpoint على HF
+- إشعار تلقائي لك عبر هذا البوت
+
+❓ *أسئلة شائعة:*
+
+س: كم مرة يجب التشغيل؟
+ج: يومياً إن أمكن. حتى مرة كل 3 أيام كافية.
+
+س: ماذا لو فشلت الجلسة؟
+ج: لا مشكلة، الشغّل مرة أخرى. النظام يحفظ التقدم.
+
+س: هل أحتاج GPU قوي؟
+ج: لا، T4 على Kaggle كافٍ تماماً.
 """
-    bot.reply_to(message, text)
+    bot.reply_to(message, text, parse_mode="Markdown")
 
-# ====== أوامر المالك فقط ======
+@bot.message_handler(commands=['test_model'])
+def test_model(message):
+    """اختبار النموذج (تحت التطوير)"""
+    text = """
+🧪 *اختبار النموذج*
 
-def is_owner(message):
-    """التحقق أن المستخدم هو المالك"""
-    return message.from_user.id == OWNER_CHAT_ID
+هذه الميزة قيد التطوير.
 
-@bot.message_handler(commands=['workers'])
-def list_workers(message):
-    """عرض قائمة كل الأصدقاء (للمالك فقط)"""
-    if not is_owner(message):
-        bot.reply_to(message, "❌ هذا الأمر للمالك فقط")
-        return
-    
-    try:
-        from github import Github
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(GITHUB_REPO)
-        contents = repo.get_contents("maestro/workers_config.yaml")
-        config = yaml.safe_load(contents.decoded_content.decode())
-        
-        workers = config.get('workers', [])
-        active_count = sum(1 for w in workers if w.get('enabled', True))
-        
-        text = f"👥 إجمالي Workers: {len(workers)} (نشط: {active_count})\n\n"
-        
-        for w in workers:
-            status_emoji = "✅" if w.get('enabled', True) else "⏸️"
-            text += f"""
-{status_emoji} {w['id']}
-   👤 HF: {w.get('hf_username', 'N/A')}
-   📈 جلسات: {w.get('total_sessions', 0)}
-   🎯 خطوات: {w.get('total_steps_trained', 0)}
-   📅 انضم: {w.get('added_at', 'N/A')[:10]}
+في الوقت الحالي، يمكنك:
+1. تنزيل آخر checkpoint من HF
+2. تحميله محلياً
+3. اختباره بـ Python
+
+📎 الرابط:
+https://huggingface.co/your-username/xandra-training-state/blob/main/checkpoints/latest.pt
+
+📌 أو انتظر التحديث القادم سيحتوي على اختبار مباشر.
 """
-        
-        bot.reply_to(message, text)
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ خطأ: {e}")
-        send_alert_to_owner(f"❌ خطأ في /workers: {e}", level="error")
+    bot.reply_to(message, text, parse_mode="Markdown")
 
-@bot.message_handler(commands=['test_alert'])
-def test_alert(message):
-    """اختبار نظام التنبيهات (للمالك فقط)"""
-    if not is_owner(message):
-        bot.reply_to(message, "❌ هذا الأمر للمالك فقط")
-        return
-    
-    send_alert_to_owner("🔔 هذا تنبيه اختباري - نظام التنبيهات يعمل!", level="success")
-    bot.reply_to(message, "✅ تم إرسال تنبيه اختباري")
-
-# ====== استقبال الـ Token ======
-@bot.message_handler(func=lambda m: waiting_for_token.get(m.from_user.id, False))
-def receive_token(message):
-    """استقبال الـ Token والتحقق منه"""
-    user_id = message.from_user.id
-    username = message.from_user.username
-    token = message.text.strip()
-    
-    # حذف من قائمة الانتظار
-    waiting_for_token[user_id] = False
-    
-    # التحقق من التنسيق
-    if not token.startswith("hf_"):
-        bot.reply_to(message, 
-            "❌ هذا لا يبدو كـ Token صالح.\n"
-            "الـ Token يجب أن يبدأ بـ `hf_`\n\n"
-            "حاول مرة أخرى: /join"
-        )
-        send_alert_to_owner(
-            f"⚠️ محاولة تسجيل فاشلة (تنسيق خاطئ)\n"
-            f"👤 @{username or 'N/A'} (ID: {user_id})",
-            level="warning"
-        )
-        return
-    
-    # حذف الرسالة لأسباب أمنية (لا يبقى الـ Token في المحادثة)
-    try:
-        bot.delete_message(message.chat.id, message.message_id)
-    except:
-        pass  # أحياناً لا يُسمح بالحذف
-    
-    bot.reply_to(message, "⏳ جاري التحقق من الـ Token...")
-    
-    # التحقق من صحة الـ Token
-    result = verify_hf_token(token)
-    
-    if result["valid"]:
-        # إنشاء معرّف Worker
-        worker_id = f"friend-{user_id}"
-        
-        # تسجيل في GitHub
-        success, error = register_worker_in_github(
-            worker_id=worker_id,
-            hf_username=result["username"],
-            hf_token=token,
-            telegram_user_id=user_id,
-            telegram_username=username
-        )
-        
-        if success:
-            success_text = f"""
-✅ تم تسجيلك بنجاح!
-
-🆔 معرّفك: {worker_id}
-👤 حساب HF: {result["username"]}
-
-🎉 شكراً لك! لا حاجة لأي إجراء آخر.
-سيتم استخدام حسابك تلقائياً للمساهمة في تدريب النموذج العربي.
-
-للمتابعة: /status
-للمغادرة: /leave
-"""
-            bot.reply_to(message, success_text)
-            
-            # 🎉 تنبيه المالك بصديق جديد
-            send_alert_to_owner(
-                f"🎉 *صديق جديد انضم للنظام!*\n\n"
-                f"🆔 المعرّف: `{worker_id}`\n"
-                f"👤 حساب HF: `{result['username']}`\n"
-                f"📱 Telegram: @{username or 'N/A'}\n"
-                f"🆔 Telegram ID: `{user_id}`\n"
-                f"📅 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"✅ جاهز للمساهمة في التدريب",
-                level="success"
-            )
-            
-        else:
-            bot.reply_to(message, 
-                f"❌ حدث خطأ أثناء التسجيل.\n"
-                f"السبب: فشل إضافة البيانات إلى GitHub\n\n"
-                f"حاول مرة أخرى لاحقاً: /join\n"
-                f"لو استمرت المشكلة، تواصل مع الإدارة."
-            )
-            send_alert_to_owner(
-                f"❌ *فشل تسجيل صديق جديد*\n\n"
-                f"👤 @{username or 'N/A'} (ID: {user_id})\n"
-                f"👤 HF: {result['username']}\n"
-                f"الخطأ: `{error}`",
-                level="error"
-            )
-    else:
-        bot.reply_to(message, 
-            f"❌ الـ Token غير صالح.\n\n"
-            f"السبب: {result.get('error', 'غير معروف')}\n\n"
-            f"تأكد من:\n"
-            f"- نسخت الـ Token كاملاً\n"
-            f"- لم تنته صلاحيته\n"
-            f"- أنشأته من: https://huggingface.co/settings/tokens\n\n"
-            f"حاول مرة أخرى: /join"
-        )
-        send_alert_to_owner(
-            f"⚠️ *Token غير صالح*\n\n"
-            f"👤 @{username or 'N/A'} (ID: {user_id})\n"
-            f"السبب: {result.get('error', 'غير معروف')}",
-            level="warning"
-        )
-
-# ====== معالج الأخطاء العام ======
 @bot.message_handler(func=lambda m: True)
-def handle_all_messages(message):
+def handle_all(message):
     """الرد على أي رسالة غير معروفة"""
     bot.reply_to(message, 
         "لم أفهم هذا الأمر.\n\n"
-        "الأوامر المتاحة:\n"
-        "/start - ترحيب\n"
-        "/join - تسجيل\n"
-        "/status - حالتك\n"
-        "/leave - مغادرة\n"
-        "/help - مساعدة"
+        "الأوامر: /start /status /progress /help"
     )
 
-# ====== بدء التشغيل ======
-if __name__ == "__main__":
-    logger.info("=" * 50)
-    logger.info("🤖 Xandra Maestro Bot بدأ التشغيل")
-    logger.info(f"📋 OWNER_CHAT_ID: {OWNER_CHAT_ID}")
-    logger.info(f"📋 GITHUB_REPO: {GITHUB_REPO}")
-    logger.info(f"📋 ALERTS_ENABLED: {ALERTS_ENABLED}")
-    logger.info("=" * 50)
+# ====== Webhook endpoints ======
+
+@app.route('/', methods=['GET'])
+def index():
+    """صفحة رئيسية بسيطة"""
+    return """
+    <html>
+        <head><title>Xandra Maestro Bot</title></head>
+        <body style="font-family: Arial; text-align: center; padding: 50px;">
+            <h1>🎵 Xandra Maestro Bot</h1>
+            <p>البوت يعمل بنجاح ✅</p>
+            <p>افتح البوت على تيليجرام: <a href="https://t.me/xandra_maestro_bot">@xandra_maestro_bot</a></p>
+        </body>
+    </html>
+    """
+
+@app.route('/webhook/' + BOT_TOKEN, methods=['POST'])
+def webhook():
+    """استقبال رسائل تيليجرام عبر Webhook"""
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "error"}), 400
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    """ضبط الـ Webhook (شغّله مرة واحدة بعد النشر)"""
+    if not RENDER_EXTERNAL_URL:
+        return "❌ RENDER_EXTERNAL_URL غير مُعد"
     
-    # تنبيه بدء التشغيل
-    send_alert_to_owner(
-        "🤖 *Xandra Maestro Bot بدأ التشغيل*\n\n"
-        f"⏰ الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"📋 البوت: @xandra_maestro_bot\n"
-        f"✅ جاهز لاستقبال الأصدقاء",
-        level="success"
-    )
+    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook/{BOT_TOKEN}"
+    response = bot.set_webhook(url=webhook_url)
     
-    try:
-        bot.polling(none_stop=True, interval=2, timeout=60)
-    except Exception as e:
-        logger.error(f"❌ خطأ في التشغيل: {e}")
-        send_alert_to_owner(
-            f"🚨 *خطأ حرج في البوت*\n\n{str(e)}\n\n{traceback.format_exc()}",
-            level="error"
-        )
-        # إعادة المحاولة بعد 30 ثانية
-        import time
-        time.sleep(30)
-        bot.polling(none_stop=True)
+    if response:
+        return f"✅ تم ضبط Webhook: {webhook_url}"
+    return "❌ فشل ضبط Webhook"
+
+@app.route('/health', methods=['GET'])
+def health():
+    """فحص الصحة (لـ Render)"""
+    return jsonify({
+        "status": "ok",
+        "bot": "xandra_maestro",
+        "version": "2.0"
+    })
+
+# ====== التشغيل ======
+if __name__ == '__main__':
+    # على Render، نستخدم Webhook
+    port = int(os.environ.get('PORT', 5000))
+    
+    if RENDER_EXTERNAL_URL:
+        # ضبط الـ webhook تلقائياً
+        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook/{BOT_TOKEN}"
+        bot.remove_webhook()
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Webhook مضبوط: {webhook_url}")
+    
+    app.run(host='0.0.0.0', port=port, debug=False)

@@ -1,71 +1,89 @@
 """
-Xandra Maestro - المنسّق المركزي المُحدّث
-==========================================
-يقرأ قائمة Workers من workers_config.yaml
-يستدعي HF ZeroGPU Space عبر API لكل Worker
-يجمع النتائج، يرفعها على HF، يرسل إشعارات Telegram
+Xandra Maestro - الإصدار 2.0 (مبسّط)
+====================================
+يعمل على GitHub Actions كل ساعة
+يقرأ state من HF، يرسل إشعارات Telegram
 
-التنبيهات الإضافية:
-- بدء مهمة تدريب
-- نجاح مهمة تدريب
-- فشل مهمة تدريب
-- Token أصبح غير صالح
-- استنفاد حصة Worker
-- أخطاء GitHub Actions
+الاختلافات عن v1.0:
+- لا يطلق تدريباً تلقائياً (لا يمكنه ذلك على Kaggle)
+- يراقب التقدم فقط
+- يكتشف النضج (Loss يستقر)
+- يرسل تنبيهات احتفالية
 """
 
 import os
-import yaml
 import json
-import time
 import logging
-import traceback
 import requests
 from datetime import datetime
-from gradio_client import Client
-from huggingface_hub import HfApi, upload_file, hf_hub_download
+from huggingface_hub import hf_hub_download, HfApi
 
 # ====== الإعدادات ======
 HF_REPO = os.environ.get("HF_REPO", "your-username/xandra-training-state")
-OWNER_TOKEN = os.environ.get("HF_TOKEN_OWNER")
-ZERO_GPU_SPACE = os.environ.get("ZERO_GPU_SPACE", "your-username/xandra-trainer")
+HF_TOKEN = os.environ.get("HF_TOKEN_OWNER")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID")
-MAX_RETRIES = 3
 
-# ====== نظام التسجيل ======
+# ====== التسجيل ======
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('xandra_maestro.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-hf_api = HfApi(token=OWNER_TOKEN)
+# ====== قائمة المراحل الاحتفالية ======
+STEP_MILESTONES = [100, 500, 1000, 5000, 10000, 25000, 50000, 100000, 250000, 500000]
+LOSS_MILESTONES = [10, 5, 4, 3, 2.5, 2, 1.5]
 
-# ====== نظام التنبيهات ======
+# ملف لتتبع المراحل التي تم الاحتفال بها
+CELEBRATED_FILE = "celebrated_milestones.json"
+
+def load_cebrated():
+    """تحميل قائمة المراحل المحتفل بها"""
+    try:
+        with open(CELEBRATED_FILE) as f:
+            return set(json.load(f))
+    except:
+        return set()
+
+def save_celebrated(celebrated_set):
+    """حفظ قائمة المراحل المحتفل بها"""
+    with open(CELEBRATED_FILE, 'w') as f:
+        json.dump(list(celebrated_set), f)
+
+# ====== قراءة state من HF ======
+def get_training_state():
+    """قراءة آخر حالة تدريب من HF"""
+    try:
+        path = hf_hub_download(
+            repo_id=HF_REPO,
+            filename="state.json",
+            repo_type="model",
+            token=HF_TOKEN
+        )
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"⚠️ لا توجد حالة: {e}")
+        return {
+            "current_step": 0,
+            "target_steps": 500000,
+            "current_loss": None,
+            "history": [],
+            "best_loss": float('inf'),
+            "last_updated": None
+        }
+
+# ====== إرسال إشعار Telegram ======
 def send_alert(message, level="info"):
-    """
-    إرسال تنبيه للمالك عبر Telegram
-    
-    Args:
-        message: نص الرسالة
-        level: info, success, warning, error
-    """
+    """إرسال تنبيه للمالك"""
     if not TELEGRAM_BOT_TOKEN or not OWNER_CHAT_ID:
-        logger.info(f"📨 تنبيه ({level}): {message}")
+        logger.info(f"📨 ({level}): {message}")
         return
     
     emojis = {
-        "info": "ℹ️",
-        "success": "✅",
-        "warning": "⚠️",
-        "error": "🚨",
-        "training": "🎓",
-        "progress": "📊"
+        "info": "ℹ️", "success": "✅", "warning": "⚠️", 
+        "error": "🚨", "celebrate": "🎉", "progress": "📊"
     }
     emoji = emojis.get(level, "ℹ️")
     
@@ -82,344 +100,193 @@ def send_alert(message, level="info"):
             timeout=15
         )
         if response.status_code == 200:
-            logger.info(f"✅ تم إرسال تنبيه ({level})")
+            logger.info(f"✅ تم إرسال إشعار ({level})")
         else:
-            logger.error(f"❌ فشل إرسال: {response.status_code} - {response.text}")
+            logger.error(f"❌ فشل إرسال: {response.status_code}")
     except Exception as e:
-        logger.error(f"❌ فشل إرسال التنبيه: {e}")
+        logger.error(f"❌ فشل إرسال الإشعار: {e}")
 
-# ====== قراءة حالة المشروع ======
-def get_training_state():
-    """قراءة آخر حالة تدريب من HF"""
-    try:
-        path = hf_hub_download(
-            repo_id=HF_REPO,
-            filename="state.json",
-            repo_type="model",
-            token=OWNER_TOKEN
-        )
-        with open(path) as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning(f"⚠️ لا توجد حالة سابقة: {e}")
-        return {
-            "current_step": 0,
-            "target_steps": 500000,
-            "current_loss": None,
-            "last_checkpoint": None,
-            "history": [],
-            "status": "ready",
-            "started_at": None
-        }
-
-def save_training_state(state):
-    """حفظ الحالة المُحدّثة على HF"""
-    state["updated_at"] = datetime.now().isoformat()
-    with open("state.json", "w") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+# ====== فحص مراحل الاحتفال ======
+def check_milestones(state, celebrated):
+    """فحص هل وصلنا لمرحلة جديدة يجب الاحتفال بها"""
+    step = state.get('current_step', 0)
+    loss = state.get('current_loss')
     
-    try:
-        upload_file(
-            path_or_fileobj="state.json",
-            path_in_repo="state.json",
-            repo_id=HF_REPO,
-            repo_type="model",
-            token=OWNER_TOKEN
-        )
-        logger.info("💾 تم حفظ الحالة على HF")
-    except Exception as e:
-        logger.error(f"❌ فشل حفظ الحالة: {e}")
-        send_alert(
-            f"❌ فشل حفظ الحالة على HF\n\n{str(e)}",
-            level="error"
-        )
-
-# ====== قراءة Workers ======
-def load_workers():
-    """قراءة جميع Workers المُفعّلين"""
-    try:
-        with open("maestro/workers_config.yaml") as f:
-            config = yaml.safe_load(f)
-        workers = [w for w in config.get('workers', []) if w.get('enabled', True)]
-        logger.info(f"👥 Workers متاحون: {len(workers)}")
-        return workers
-    except Exception as e:
-        logger.error(f"❌ فشل قراءة workers_config: {e}")
-        send_alert(
-            f"❌ فشل قراءة workers_config.yaml\n\n{str(e)}",
-            level="error"
-        )
-        return []
-
-# ====== الحصول على Token Worker ======
-def get_worker_token(worker):
-    """استخراج Token العامل من Environment (في GitHub Actions)"""
-    secret_name = worker.get('token_secret', '')
-    return os.environ.get(secret_name, "")
-
-# ====== التحقق من صحة Token ======
-def check_token_valid(token):
-    """التحقق من أن الـ Token ما زال صالحاً"""
-    try:
-        response = requests.get(
-            "https://huggingface.co/api/whoami-v2",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15
-        )
-        return response.status_code == 200
-    except:
-        return False
-
-# ====== استدعاء ZeroGPU Space ======
-def call_zerogpu_space(worker_token, worker_id, current_step, max_steps=500):
-    """
-    استدعاء الـ Space عبر gradio_client باستخدام Token الصديق
+    # فحص مراحل الخطوات
+    for milestone in STEP_MILESTONES:
+        key = f"step_{milestone}"
+        if step >= milestone and key not in celebrated:
+            celebrate_step(milestone, step, state)
+            celebrated.add(key)
     
-    Returns:
-        dict: نتائج التدريب أو خطأ
-    """
-    try:
-        logger.info(f"📤 استدعاء Space لـ {worker_id} من الخطوة {current_step}")
-        
-        # التحقق من صحة Token أولاً
-        if not check_token_valid(worker_token):
-            return {
-                "success": False,
-                "error": "TOKEN_INVALID",
-                "message": f"Token الصديق {worker_id} غير صالح"
-            }
-        
-        # إنشاء Client باستخدام Token الصديق
-        client = Client(
-            ZERO_GPU_SPACE,
-            hf_token=worker_token
-        )
-        
-        # استدعاء دالة التدريب
-        result = client.predict(
-            current_step=current_step,
-            max_steps=max_steps,
-            api_name="/train_step"
-        )
-        
-        logger.info(f"✅ نتيجة {worker_id}: {result}")
-        return result
-        
-    except Exception as e:
-        error_str = str(e).lower()
-        
-        # تحديد نوع الخطأ
-        if "401" in error_str or "unauthorized" in error_str:
-            return {
-                "success": False,
-                "error": "TOKEN_INVALID",
-                "message": f"Token {worker_id} مرفوض من HF"
-            }
-        elif "quota" in error_str or "rate limit" in error_str:
-            return {
-                "success": False,
-                "error": "QUOTA_EXCEEDED",
-                "message": f"حصة {worker_id} استُنفدت"
-            }
-        elif "timeout" in error_str:
-            return {
-                "success": False,
-                "error": "TIMEOUT",
-                "message": f"انتهى وقت {worker_id}"
-            }
-        else:
-            return {
-                "success": False,
-                "error": "UNKNOWN",
-                "message": f"خطأ غير معروف لـ {worker_id}: {str(e)}"
-            }
-
-# ====== معالجة نتيجة التدريب ======
-def process_training_result(result, worker, state):
-    """معالجة نتيجة التدريب من الـ Space"""
+    # فحص مراحل الخسارة
+    if loss is not None:
+        for milestone in LOSS_MILESTONES:
+            key = f"loss_{milestone}"
+            if loss < milestone and key not in celebrated:
+                celebrate_loss(milestone, loss, step)
+                celebrated.add(key)
     
-    if not result.get("success"):
-        error_type = result.get("error", "UNKNOWN")
-        error_message = result.get("message", "غير معروف")
+    # فحص النضج (Loss يستقر)
+    check_convergence(state, celebrated)
+    
+    # فحص اكتمال التدريب
+    if step >= state.get('target_steps', 500000):
+        key = "training_complete"
+        if key not in celebrated:
+            celebrate_completion(state)
+            celebrated.add(key)
+
+def celebrate_step(milestone, current_step, state):
+    """الاحتفال بمرحلة خطوات"""
+    progress = (current_step / state['target_steps']) * 100
+    send_alert(
+        f"*🎉 مرحلة مهمة!*\n\n"
+        f"وصلنا للخطوة `{milestone:,}`\n"
+        f"📊 نسبة الإنجاز: `{progress:.2f}%`\n"
+        f"🎯 الهدف: `{state['target_steps']:,}`\n"
+        f"📉 الخسارة الحالية: `{state.get('current_loss', 'N/A')}`",
+        level="celebrate"
+    )
+
+def celebrate_loss(milestone, current_loss, step):
+    """الاحتفال بمرحلة خسارة"""
+    messages = {
+        10: "النموذج تخرج من مرحلة الهراء!",
+        5: "النموذج بدأ ينتج نصاً مفهوماً!",
+        4: "النموذج بدأ يفهم اللغة العربية!",
+        3: "النموذج أصبح جيداً!",
+        2.5: "النموذج أصبح قوياً جداً!",
+        2: "النموذج وصل لنضج متقدم!",
+        1.5: "النموذج في مستوى ممتاز!"
+    }
+    msg = messages.get(milestone, "إنجاز!")
+    
+    send_alert(
+        f"*🎉 معلم خسارة مهم!*\n\n"
+        f"الخسارة وصلت لـ أقل من `{milestone}`\n"
+        f"📉 الخسارة الحالية: `{current_loss:.4f}`\n"
+        f"📈 الخطوة: `{step:,}`\n\n"
+        f"📌 {msg}",
+        level="celebrate"
+    )
+
+def check_convergence(state, celebrated):
+    """فحص هل النموذج نضج (Loss يستقر)"""
+    history = state.get('history', [])
+    if len(history) < 5:
+        return
+    
+    # آخر 5 سجلات
+    recent = history[-5:]
+    losses = [h.get('final_loss', 0) for h in recent]
+    
+    if all(losses):
+        avg_recent = sum(losses) / len(losses)
+        avg_old = sum(losses[:2]) / 2
+        improvement = (avg_old - avg_recent) / avg_old * 100
         
-        # تنبيه حسب نوع الخطأ
-        if error_type == "TOKEN_INVALID":
-            # تنبيه حرج: Token الصديق أصبح غير صالح
+        # لو التحسن أقل من 1% خلال 5 جلسات
+        if abs(improvement) < 1 and "convergence_warning" not in celebrated:
             send_alert(
-                f"🚨 *Token غير صالح*\n\n"
-                f"👤 الصديق: `{worker['id']}`\n"
-                f"👤 HF: `{worker.get('hf_username', 'N/A')}`\n"
-                f"📱 Telegram: @{worker.get('telegram_username', 'N/A')}\n\n"
-                f"السبب: {error_message}\n\n"
-                f"📌 الإجراء: يجب تحديث Token أو إيقاف الـ Worker",
-                level="error"
-            )
-            
-        elif error_type == "QUOTA_EXCEEDED":
-            # تنبيه عادي: استنفاد الحصة (متوقع)
-            logger.info(f"⏳ {worker['id']} استنفد حصته (طبيعي)")
-            # لا نرسل تنبيه لهذا (متكرر جداً)
-            
-        else:
-            # تنبيه تحذيري: خطأ غير متوقع
-            send_alert(
-                f"⚠️ *فشل مهمة تدريب*\n\n"
-                f"👤 الصديق: `{worker['id']}`\n"
-                f"👤 HF: `{worker.get('hf_username', 'N/A')}\n\n"
-                f"الخطأ: {error_message}\n"
-                f"النوع: {error_type}",
+                f"*🎯 قد يكون النموذج نضج!*\n\n"
+                f"آخر 5 جلسات لم تُظهر تحسناً ملحوظاً:\n"
+                f"  متوسط أول جلستين: `{losses[0]:.4f}`\n"
+                f"  متوسط آخر جلسة: `{losses[-1]:.4f}`\n"
+                f"  نسبة التحسن: `{improvement:.2f}%`\n\n"
+                f"📌 توصية: اختبر النموذج يدوياً.\n"
+                f"  أرسل `/test_model` للبوت لتجربة النموذج.",
                 level="warning"
             )
-        
-        # تحديث حالة الـ Worker
-        state["status"] = "ready"
-        save_training_state(state)
-        return state
-    
-    # ✅ نجح التدريب
-    new_step = result.get("final_step", state["current_step"])
-    steps_done = result.get("steps_completed", new_step - state["current_step"])
-    final_loss = result.get("final_loss")
-    
-    state["current_step"] = new_step
-    state["current_loss"] = final_loss
-    state["status"] = "ready"
-    state["last_checkpoint"] = datetime.now().isoformat()
-    state["history"].append({
-        "worker_id": worker['id'],
-        "started_at": state.get("started_at"),
-        "completed_at": datetime.now().isoformat(),
-        "steps_done": steps_done,
-        "final_loss": final_loss
-    })
-    
-    # الحفاظ على آخر 50 سجل فقط
-    if len(state["history"]) > 50:
-        state["history"] = state["history"][-50:]
-    
-    save_training_state(state)
-    
-    # حساب نسبة الإنجاز
-    progress = (new_step / state["target_steps"]) * 100
-    
-    # تنبيه نجاح المهمة
+            # نضيف علامة مؤقتاً (لمدة 24 ساعة مثلاً)
+            celebrated.add("convergence_warning")
+
+def celebrate_completion(state):
+    """الاحتفال بإكمال التدريب"""
     send_alert(
-        f"✅ *اكتملت جلسة تدريب*\n\n"
-        f"👤 الصديق: `{worker['id']}`\n"
-        f"👤 HF: `{worker.get('hf_username', 'N/A')}`\n"
-        f"📈 الخطوة الحالية: `{new_step:,}` / `{state['target_steps']:,}`\n"
-        f"📊 نسبة الإنجاز: `{progress:.2f}%`\n"
-        f"📉 الخسارة: `{final_loss:.4f}`" if final_loss else "📉 الخسارة: N/A"
-        + f"\n⚡ خطوات الجلسة: `{steps_done}`\n"
-        f"📅 الوقت: {datetime.now().strftime('%H:%M:%S')}",
-        level="success"
+        f"*🎊🎊🎊 اكتمل التدريب! 🎊🎊🎊*\n\n"
+        f"الخطوة النهائية: `{state['current_step']:,}`\n"
+        f"الخسارة النهائية: `{state.get('current_loss', 'N/A')}`\n"
+        f"أفضل خسارة: `{state.get('best_loss', 'N/A')}`\n\n"
+        f"🎯 النموذج جاهز للنشر!\n"
+        f"📌 الخطوات التالية:\n"
+        f"  1. `/export` لتصدير GGUF\n"
+        f"  2. `/deploy` للنشر على Render\n"
+        f"  3. `/test` لاختبار شامل",
+        level="celebrate"
     )
+
+# ====== تقرير يومي ======
+def send_daily_report(state):
+    """إرسال تقرير يومي عن التقدم"""
+    history = state.get('history', [])
+    if not history:
+        return
     
-    # تنبيه خاص عند الوصول لمراحل مهمة
-    milestones = [1000, 5000, 10000, 25000, 50000, 100000, 250000, 500000]
-    if new_step in milestones:
-        send_alert(
-            f"🎉 *مرحلة مهمة!*\n\n"
-            f"وصلنا للخطوة `{new_step:,}`\n"
-            f"نسبة الإنجاز: `{progress:.2f}%`",
-            level="success"
-        )
+    # آخر 24 ساعة
+    last_24h = [h for h in history if h.get('timestamp') and 
+                (datetime.now() - datetime.fromisoformat(h['timestamp'].replace('Z', '+00:00'))).total_seconds() < 86400]
     
-    return state
+    if not last_24h:
+        return
+    
+    steps_today = sum(h.get('steps_done', 0) for h in last_24h)
+    sessions_today = len(last_24h)
+    
+    send_alert(
+        f"*📊 تقرير اليوم*\n\n"
+        f"📈 جلسات اليوم: `{sessions_today}`\n"
+        f"🎯 خطوات اليوم: `{steps_today:,}`\n"
+        f"📊 إجمالي الخطوات: `{state['current_step']:,}`\n"
+        f"🎯 الهدف: `{state['target_steps']:,}`\n"
+        f"📊 نسبة الإنجاز: `{(state['current_step']/state['target_steps']*100):.2f}%`\n"
+        f"📉 الخسارة الحالية: `{state.get('current_loss', 'N/A')}`\n\n"
+        f"📌 تابع تشغيل Notebook يومياً!",
+        level="progress"
+    )
 
 # ====== الحلقة الرئيسية ======
 def main():
-    """الحلقة الرئيسية للمايسترو"""
-    logger.info("=" * 50)
-    logger.info(f"🎵 Xandra Maestro - {datetime.now()}")
+    logger.info(f"🎵 Xandra Maestro v2.0 - {datetime.now()}")
     
-    try:
-        # 1. قراءة الحالة الحالية
-        state = get_training_state()
-        logger.info(f"📊 الخطوة الحالية: {state['current_step']}")
-        
-        # 2. لو المشروع انتهى
-        if state["current_step"] >= state["target_steps"]:
-            send_alert(
-                f"🎉 *التدريب اكتمل!*\n\n"
-                f"وصلنا للخطوة {state['current_step']}\n"
-                f"النموذج جاهز!",
-                level="success"
-            )
-            return
-        
-        # 3. لو هناك مهمة تعمل، لا تطلق جديدة
-        if state.get("status") == "running":
-            logger.info("⏳ هناك مهمة تعمل بالفعل")
-            return
-        
-        # 4. تحميل Workers
-        workers = load_workers()
-        if not workers:
-            logger.warning("⚠️ لا يوجد Workers!")
-            return
-        
-        # 5. محاولة كل Worker بالتوالي
-        for worker in workers:
-            token = get_worker_token(worker)
-            if not token:
-                logger.warning(f"⚠️ لا يوجد Token لـ {worker['id']}")
-                continue
-            
-            logger.info(f"🔄 محاولة {worker['id']}...")
-            
-            # إرسال تنبيه بدء المهمة
-            send_alert(
-                f"🚀 *بدء مهمة تدريب*\n\n"
-                f"👤 الصديق: `{worker['id']}`\n"
-                f"👤 HF: `{worker.get('hf_username', 'N/A')}`\n"
-                f"📊 الخطوة الحالية: `{state['current_step']:,}`",
-                level="training"
-            )
-            
-            # تحديث الحالة
-            state["status"] = "running"
-            state["started_at"] = datetime.now().isoformat()
-            save_training_state(state)
-            
-            # استدعاء الـ Space مع إعادة المحاولة
-            result = None
-            for attempt in range(MAX_RETRIES):
-                if attempt > 0:
-                    logger.info(f"🔄 إعادة محاولة {attempt + 1}/{MAX_RETRIES}")
-                    time.sleep(5)
-                
-                result = call_zerogpu_space(
-                    worker_token=token,
-                    worker_id=worker['id'],
-                    current_step=state["current_step"]
+    # قراءة الحالة
+    state = get_training_state()
+    logger.info(f"📊 الخطوة الحالية: {state.get('current_step', 0)}")
+    
+    # فحص المراحل
+    celebrated = load_celebrated()
+    check_milestones(state, celebrated)
+    save_celebrated(celebrated)
+    
+    # تقرير يومي (مرة كل 24 ساعة)
+    if state.get('last_updated'):
+        try:
+            last_update = datetime.fromisoformat(state['last_updated'].replace('Z', '+00:00'))
+            hours_since = (datetime.now() - last_update).total_seconds() / 3600
+            if hours_since >= 24:
+                send_daily_report(state)
+                state['last_daily_report'] = datetime.now().isoformat()
+        except:
+            pass
+    
+    # فحص هل آخر تحديث قديم جداً (تنبيه)
+    history = state.get('history', [])
+    if history:
+        last_session = history[-1]
+        try:
+            last_time = datetime.fromisoformat(last_session['timestamp'].replace('Z', '+00:00'))
+            hours_since = (datetime.now() - last_time).total_seconds() / 3600
+            if hours_since > 48:
+                send_alert(
+                    f"*⚠️ توقف التدريب!*\n\n"
+                    f"آخر جلسة كانت منذ `{hours_since:.0f}` ساعة\n"
+                    f"📌 يجب تشغيل Notebook على Kaggle!",
+                    level="warning"
                 )
-                
-                # لو نجحت، اخرج
-                if result.get("success"):
-                    break
-                
-                # لو فشل بـ Token غير صالح، لا تعيد المحاولة
-                if result.get("error") == "TOKEN_INVALID":
-                    break
-            
-            # معالجة النتيجة
-            state = process_training_result(result, worker, state)
-            
-            # لو نجحت، اخرج من الحلقة
-            if result and result.get("success"):
-                break
-        
-        logger.info(f"✅ انتهت الدورة. الخطوة النهائية: {state['current_step']}")
-        
-    except Exception as e:
-        error_msg = f"❌ خطأ حرج في Maestro:\n{str(e)}\n\n{traceback.format_exc()}"
-        logger.error(error_msg)
-        send_alert(
-            f"🚨 *خطأ حرج في Maestro*\n\n"
-            f"```\n{str(e)[:500]}\n```",
-            level="error"
-        )
+        except:
+            pass
+    
+    logger.info("✅ انتهت الدورة")
 
 if __name__ == "__main__":
     main()

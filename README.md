@@ -1,87 +1,73 @@
-# 🎯 Xandra Hope System
+# 🎯 Xandra Hope System v2.0
 
-نظام تدريب أوتوماتيكي كامل لبناء نموذج Xandra Hope السيادي.
+نظام تدريب شبه آلي مجاني بالكامل لبناء نموذج Xandra Hope.
 
 ## 📁 البنية
 
 ```
-xandra-system/
+xandra-system-v2/
 │
-├── bot/                          # بوت تيليجرام
-│   └── telegram_bot.py           # استقبال تسجيل الأصدقاء
+├── bot/                          # بوت تيليجرام (Render.com)
+│   ├── telegram_bot.py           # Flask + Webhook
+│   ├── requirements.txt
 │
-├── space/                        # HF Space (ZeroGPU)
-│   ├── app.py                    # كود التدريب
-│   ├── requirements.txt          # متطلبات Python
-│   └── README.md                 # إعدادات الـ Space
+├── kaggle/                       # Notebook التدريب
+│   └── xandra_worker.ipynb       # جاهز للتشغيل
 │
-├── maestro/                      # المنسّق المركزي
-│   ├── maestro.py                # الكود الرئيسي
-│   └── workers_config.yaml       # سجل الأصدقاء
+├── maestro/                      # المنسّق
+│   └── maestro.py                # يراقب + يرسل إشعارات
 │
 ├── .github/workflows/
-│   └── maestro.yml               # جدولة GitHub Actions
+│   └── maestro.yml               # جدولة كل ساعة
 │
-├── docs/                         # التوثيق
-│   ├── setup_guide.md            # دليل الإعداد الكامل
-│   └── friend_guide.md           # دليل الصديق (5 دقائق فقط)
+├── render.yaml                   # إعدادات Render.com
 │
-└── README.md                     # هذا الملف
+└── docs/
+    ├── MASTER_PLAN_v2.md         # الخطة الكاملة
+    ├── setup_guide.md             # دليل الإعداد
+    ├── daily_workflow.md          # دليل العمل اليومي
+    └── UPDATES_v2.0.md            # شرح التحديثات
 ```
 
 ## 🚀 البدء السريع
 
-1. **اقرأ**: `docs/setup_guide.md` - دليل الإعداد الكامل
-2. **أنشئ الـ Spaces على HF** (خطوة 1)
-3. **أنشئ البوت** (خطوة 2)
-4. **أنشئ GitHub Repo + Secrets** (خطوة 3-4)
-5. **ارفع الكود** (الملفات الموجودة هنا)
-6. **اختبر** (خطوة 6)
-7. **ادعو الأصدقاء** باستخدام `docs/friend_guide.md`
+1. **اقرأ** `docs/MASTER_PLAN_v2.md` - الخطة الكاملة
+2. **اتبع** `docs/setup_guide.md` - خطوة بخطوة للإعداد
+3. **يومياً** `docs/daily_workflow.md` - الروتين اليومي
 
 ## 🎯 المميزات
 
-- ✅ مجاني 100%
-- ✅ صديقك يسجّل مرة واحدة (5 دقائق) ثم لا شيء
-- ✅ أتمتة كاملة عبر GitHub Actions
-- ✅ إشعارات تيليجرام فورية
-- ✅ تخزين مركزي على Hugging Face
-- ✅ قابل للتوسع (إضافة أصدقاء بسهولة)
-- ✅ آمن (Tokens بصلاحية Read فقط)
+- ✅ مجاني 100% (لا HF PRO، لا بطاقات بنكية)
+- ✅ 5 دقائق يومياً فقط منك
+- ✅ أتمتة شبه كاملة (Kaggle → HF → GitHub → Telegram)
+- ✅ إشعارات تلقائية بكل تقدم
+- ✅ احتفالات في المراحل المهمة
+- ✅ تتبع Loss والتنبيه عند النضج
 
-## 📊 كيف يعمل النظام؟
+## 📊 كيف يعمل؟
 
 ```
-صديق يسجّل في HF → يعطيك Token → ينتهي دوره
-              ↓
-        البوت يحفظ Token
-              ↓
-   GitHub Actions يعمل كل ساعة
-              ↓
-   Maestro يقرأ Tokens الأصدقاء
-              ↓
-   يستدعي ZeroGPU Space لكل صديق
-              ↓
-   Space يدرّب النموذج 500 خطوة
-              ↓
-   يحفظ checkpoint على HF
-              ↓
-   Maestro يرسل إشعار لك على تيليجرام
+أنت (5 دقائق) → تشغّل Notebook على Kaggle
+                    ↓
+        Notebook يدرّب 12 ساعة تلقائياً
+                    ↓
+        يحفظ checkpoints على HF (مجاني)
+                    ↓
+        Maestro على GitHub Actions (كل ساعة)
+                    ↓
+        يقرأ state ويرسل إشعارات Telegram
+                    ↓
+        أنت تشوف التقدم على البوت
 ```
 
-## 🔐 الأمان
+## 🔧 المتطلبات
 
-- Tokens بصلاحية "Read" فقط
-- مستودعاتك Private على HF
-- GitHub Repo Private
-- يمكن سحب أي صديق فوراً (/leave)
-
-## 📚 المراجع
-
-- [Hugging Face ZeroGPU Docs](https://huggingface.co/docs/hub/spaces-zero-gpu)
-- [GitHub Actions Docs](https://docs.github.com/actions)
-- [Telegram Bot API](https://core.telegram.org/bots/api)
+- GitHub account
+- Hugging Face account  
+- Kaggle account
+- Telegram account
+- Render.com account (مجاني)
 
 ## 📜 الترخيص
 
-Apache 2.0 - يمكنك استخدام هذا الكود لأي غرض، بما في ذلك التجاري.
+Apache 2.0
