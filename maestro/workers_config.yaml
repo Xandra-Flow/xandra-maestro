@@ -1,0 +1,30 @@
+# سجل Workers في النظام
+# كل Worker جديد يُضاف هنا تلقائياً عبر البوت
+
+workers:
+  # ─────────────────────────────────────
+  # المالك (أنت)
+  # ─────────────────────────────────────
+  - id: "owner"
+    service: "hf_zerogpu"
+    enabled: true
+    hf_username: "your-username"
+    token_secret: "HF_TOKEN_OWNER"
+    telegram_user_id: null
+    added_at: "2026-11-06"
+    total_steps_trained: 0
+    total_sessions: 0
+
+  # ─────────────────────────────────────
+  # الأصدقاء (يُضافون تلقائياً عبر البوت)
+  # ─────────────────────────────────────
+  # مثال:
+  # - id: "friend-123456789"
+  #   service: "hf_zerogpu"
+  #   enabled: true
+  #   hf_username: "friend_username"
+  #   token_secret: "HF_TOKEN_FRIEND_123456789"
+  #   telegram_user_id: 123456789
+  #   added_at: "2026-11-07"
+  #   total_steps_trained: 0
+  #   total_sessions: 0
