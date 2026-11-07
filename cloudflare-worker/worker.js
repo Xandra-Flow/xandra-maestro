@@ -1,18 +1,33 @@
 /**
- * Xandra Hope - Registration Worker
+ * Xandra Hope - All-in-One Worker
  * =================================
- * 
- * Cloudflare Worker واحد يقوم بكل شيء:
+ * Worker واحد يفعل كل شيء:
  * 1. GET /          → عرض صفحة التسجيل
- * 2. POST /register → استقبال بيانات الصديق وتسجيله
- * 3. GET /status    → حالة التدريب
+ * 2. POST /register → استقبال البيانات وتسجيل الصديق
+ * 3. GET /status    → فحص الصحة
  * 
- * مميزات:
- * - مجاني 100% (100K طلب/يوم)
- * - لا يحتاج PythonAnywhere
- * - لا يحتاج Webhook
- * - التسجيل مباشر من الصفحة
+ * لا حاجة لـ GitHub Pages!
+ * لا مشاكل CORS (نفس النطاق)!
  */
+
+// ====== Helper: CORS Headers ======
+function corsHeaders(extra = {}) {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Content-Type': 'application/json',
+    ...extra
+  };
+}
+
+// ====== Helper: JSON Response ======
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: corsHeaders()
+  });
+}
 
 // ====== HTML الصفحة ======
 const HTML_PAGE = `<!DOCTYPE html>
@@ -343,193 +358,196 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 // ====== معالج الطلبات ======
 export default {
-    async fetch(request, env) {
-        const url = new URL(request.url);
-        
-        // === GET / === عرض الصفحة
-        if (request.method === 'GET' && url.pathname === '/') {
-            return new Response(HTML_PAGE, {
-                headers: { 'Content-Type': 'text/html; charset=utf-8' }
-            });
-        }
-        
-        // === POST /register === استقبال التسجيل
-        if (request.method === 'POST' && url.pathname === '/register') {
-            return handleRegistration(request, env);
-        }
-        
-        // === GET /status === فحص الصحة
-        if (request.method === 'GET' && url.pathname === '/status') {
-            return new Response(JSON.stringify({ status: 'ok', version: '3.0' }), {
-                headers: { 'Content-Type': 'application/json' }
-            });
-        }
-        
-        return new Response('Not Found', { status: 404 });
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    
+    // Handle CORS preflight
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders() });
     }
+    
+    // GET / → عرض الصفحة
+    if (request.method === 'GET' && url.pathname === '/') {
+      return new Response(HTML_PAGE, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+      });
+    }
+    
+    // POST /register → استقبال التسجيل
+    if (request.method === 'POST' && url.pathname === '/register') {
+      return handleRegistration(request, env);
+    }
+    
+    // GET /status → فحص الصحة
+    if (request.method === 'GET' && url.pathname === '/status') {
+      return jsonResponse({ status: 'ok', version: '3.0' });
+    }
+    
+    return new Response('Not Found', { status: 404 });
+  }
 };
 
 // ====== معالج التسجيل ======
 async function handleRegistration(request, env) {
-    try {
-        const { hf_username, hf_token } = await request.json();
-        
-        if (!hf_username || !hf_token) {
-            return jsonResponse({ success: false, error: 'بيانات ناقصة' }, 400);
-        }
-        
-        if (!hf_token.startsWith('hf_')) {
-            return jsonResponse({ success: false, error: 'الـ Token يجب أن يبدأ بـ hf_' }, 400);
-        }
-        
-        // 1. التحقق من صحة الـ Token عبر HF API
-        const hfResponse = await fetch('https://huggingface.co/api/whoami-v2', {
-            headers: { 'Authorization': 'Bearer ' + hf_token }
-        });
-        
-        if (hfResponse.status !== 200) {
-            return jsonResponse({ 
-                success: false, 
-                error: 'الـ Token غير صالح أو منتهي الصلاحية' 
-            }, 400);
-        }
-        
-        const hfData = await hfResponse.json();
-        const realHfUsername = hfData.name;
-        
-        if (hf_username.toLowerCase() !== realHfUsername.toLowerCase()) {
-            return jsonResponse({ 
-                success: false, 
-                error: 'اسم المستخدم لا يطابق الـ Token. الاسم الصحيح: ' + realHfUsername 
-            }, 400);
-        }
-        
-        // 2. إضافة Worker إلى GitHub
-        const workerId = 'friend-' + Date.now();
-        const githubResult = await addWorkerToGitHub(env, {
-            worker_id: workerId,
-            hf_username: realHfUsername,
-            hf_token: hf_token
-        });
-        
-        if (!githubResult.success) {
-            return jsonResponse({ 
-                success: false, 
-                error: 'فشل تحديث GitHub: ' + githubResult.error 
-            }, 500);
-        }
-        
-        // 3. إرسال إشعار للمالك على تيليجرام (اختياري)
-        if (env.TELEGRAM_BOT_TOKEN && env.OWNER_CHAT_ID) {
-            await sendTelegramNotification(env, {
-                worker_id: workerId,
-                hf_username: realHfUsername
-            });
-        }
-        
-        return jsonResponse({
-            success: true,
-            worker_id: workerId,
-            hf_username: realHfUsername,
-            message: 'تم التسجيل بنجاح!'
-        });
-        
-    } catch (error) {
-        return jsonResponse({ 
-            success: false, 
-            error: 'خطأ داخلي: ' + error.message 
-        }, 500);
+  try {
+    // التحقق من وجود المتغيرات
+    if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) {
+      return jsonResponse({ 
+        success: false, 
+        error: 'إعدادات Worker غير مكتملة. تأكد من إضافة GITHUB_TOKEN و GITHUB_REPO' 
+      }, 500);
     }
+    
+    const { hf_username, hf_token } = await request.json();
+    
+    if (!hf_username || !hf_token) {
+      return jsonResponse({ success: false, error: 'بيانات ناقصة' }, 400);
+    }
+    
+    if (!hf_token.startsWith('hf_')) {
+      return jsonResponse({ success: false, error: 'الـ Token يجب أن يبدأ بـ hf_' }, 400);
+    }
+    
+    // 1. التحقق من صحة الـ Token عبر HF API
+    const hfResponse = await fetch('https://huggingface.co/api/whoami-v2', {
+      headers: { 'Authorization': 'Bearer ' + hf_token }
+    });
+    
+    if (hfResponse.status !== 200) {
+      return jsonResponse({ 
+        success: false, 
+        error: 'الـ Token غير صالح أو منتهي الصلاحية' 
+      }, 400);
+    }
+    
+    const hfData = await hfResponse.json();
+    const realHfUsername = hfData.name;
+    
+    if (hf_username.toLowerCase() !== realHfUsername.toLowerCase()) {
+      return jsonResponse({ 
+        success: false, 
+        error: 'اسم المستخدم لا يطابق الـ Token. الاسم الصحيح: ' + realHfUsername 
+      }, 400);
+    }
+    
+    // 2. إضافة Worker إلى GitHub
+    const workerId = 'friend-' + Date.now();
+    const githubResult = await addWorkerToGitHub(env, {
+      worker_id: workerId,
+      hf_username: realHfUsername,
+      hf_token: hf_token
+    });
+    
+    if (!githubResult.success) {
+      return jsonResponse({ 
+        success: false, 
+        error: 'فشل تحديث GitHub: ' + githubResult.error 
+      }, 500);
+    }
+    
+    // 3. إرسال إشعار للمالك على تيليجرام (اختياري)
+    if (env.TELEGRAM_BOT_TOKEN && env.OWNER_CHAT_ID) {
+      await sendTelegramNotification(env, {
+        worker_id: workerId,
+        hf_username: realHfUsername
+      });
+    }
+    
+    return jsonResponse({
+      success: true,
+      worker_id: workerId,
+      hf_username: realHfUsername,
+      message: 'تم التسجيل بنجاح!'
+    });
+    
+  } catch (error) {
+    return jsonResponse({ 
+      success: false, 
+      error: 'خطأ داخلي: ' + error.message 
+    }, 500);
+  }
 }
 
 // ====== إضافة Worker إلى GitHub ======
 async function addWorkerToGitHub(env, data) {
-    try {
-        const headers = {
-            'Authorization': 'token ' + env.GITHUB_TOKEN,
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'Xandra-Maestro'
-        };
-        
-        // 1. قراءة workers_config.yaml الحالي
-        const fileUrl = 'https://api.github.com/repos/' + env.GITHUB_REPO + '/contents/maestro/workers_config.yaml';
-        const fileResponse = await fetch(fileUrl, { headers });
-        
-        if (fileResponse.status !== 200) {
-            return { success: false, error: 'فشل قراءة workers_config.yaml' };
-        }
-        
-        const fileData = await fileResponse.json();
-        const sha = fileData.sha;
-        
-        // فك الترميز (base64 → utf-8)
-        const content = atob(fileData.content);
-        
-        // إضافة الـ Worker الجديد (YAML format)
-        const newWorkerEntry = 
-            '\\n  - id: "' + data.worker_id + '"\\n' +
-            '    service: "kaggle"\\n' +
-            '    enabled: true\\n' +
-            '    hf_username: "' + data.hf_username + '"\\n' +
-            '    hf_token: "' + data.hf_token + '"\\n' +
-            '    added_at: "' + new Date().toISOString() + '"\\n' +
-            '    total_steps_trained: 0\\n' +
-            '    total_sessions: 0\\n' +
-            '    status: "active"';
-        
-        const newContent = content.replace(/\\n*$/, '') + newWorkerEntry + '\\n';
-        
-        // 2. رفع الملف المُحدّث
-        const updateData = {
-            message: 'Add worker: ' + data.worker_id + ' (' + data.hf_username + ')',
-            content: btoa(unescape(encodeURIComponent(newContent))),
-            sha: sha
-        };
-        
-        const updateResponse = await fetch(fileUrl, {
-            method: 'PUT',
-            headers,
-            body: JSON.stringify(updateData)
-        });
-        
-        if (updateResponse.status === 200 || updateResponse.status === 201) {
-            return { success: true };
-        } else {
-            const errorData = await updateResponse.json();
-            return { success: false, error: errorData.message };
-        }
-        
-    } catch (error) {
-        return { success: false, error: error.message };
+  try {
+    const headers = {
+      'Authorization': 'token ' + env.GITHUB_TOKEN,
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'Xandra-Maestro'
+    };
+    
+    // 1. قراءة workers_config.yaml الحالي
+    const fileUrl = 'https://api.github.com/repos/' + env.GITHUB_REPO + '/contents/maestro/workers_config.yaml';
+    const fileResponse = await fetch(fileUrl, { headers });
+    
+    if (fileResponse.status !== 200) {
+      return { success: false, error: 'فشل قراءة workers_config.yaml (تأكد من GITHUB_REPO و GITHUB_TOKEN)' };
     }
+    
+    const fileData = await fileResponse.json();
+    const sha = fileData.sha;
+    
+    // فك الترميز (base64 → utf-8)
+    const content = atob(fileData.content);
+    
+    // إضافة الـ Worker الجديد (YAML format)
+    const newWorkerEntry = 
+      '\n  - id: "' + data.worker_id + '"\n' +
+      '    service: "kaggle"\n' +
+      '    enabled: true\n' +
+      '    hf_username: "' + data.hf_username + '"\n' +
+      '    hf_token: "' + data.hf_token + '"\n' +
+      '    added_at: "' + new Date().toISOString() + '"\n' +
+      '    total_steps_trained: 0\n' +
+      '    total_sessions: 0\n' +
+      '    status: "active"';
+    
+    const newContent = content.replace(/\n*$/, '') + newWorkerEntry + '\n';
+    
+    // 2. رفع الملف المُحدّث
+    const updateData = {
+      message: 'Add worker: ' + data.worker_id + ' (' + data.hf_username + ')',
+      content: btoa(unescape(encodeURIComponent(newContent))),
+      sha: sha
+    };
+    
+    const updateResponse = await fetch(fileUrl, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(updateData)
+    });
+    
+    if (updateResponse.status === 200 || updateResponse.status === 201) {
+      return { success: true };
+    } else {
+      const errorData = await updateResponse.json();
+      return { success: false, error: errorData.message };
+    }
+    
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 // ====== إرسال إشعار تيليجرام ======
 async function sendTelegramNotification(env, data) {
-    try {
-        const message = '🎉 *صديق جديد انضم!*\\n\\n' +
-            '🆔 ' + data.worker_id + '\\n' +
-            '👤 HF: ' + data.hf_username + '\\n' +
-            '⏰ ' + new Date().toISOString();
+  try {
+    const message = '🎉 *صديق جديد انضم!*\n\n' +
+      '🆔 ' + data.worker_id + '\n' +
+      '👤 HF: ' + data.hf_username + '\n' +
+      '⏰ ' + new Date().toISOString();
 
-        await fetch('https://api.telegram.org/bot' + env.TELEGRAM_BOT_TOKEN + '/sendMessage', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                chat_id: env.OWNER_CHAT_ID,
-                text: message,
-                parse_mode: 'Markdown'
-            })
-        });
-    } catch (error) {
-        console.error('Telegram error:', error);
-    }
-}
-
-// ====== Helper: JSON Response ======
-function jsonResponse(data, status) {
-    return new Response(JSON.stringify(data), {
-        status: status || 200,
-        headers: { 'Content-Type': 'application/json' }
+    await fetch('https://api.telegram.org/bot' + env.TELEGRAM_BOT_TOKEN + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: env.OWNER_CHAT_ID,
+        text: message,
+        parse_mode: 'Markdown'
+      })
     });
+  } catch (error) {
+    console.error('Telegram error:', error);
+  }
 }
