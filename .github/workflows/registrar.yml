@@ -1,7 +1,15 @@
+# Xandra Worker Registrar
+# يستمع للـ Issues الجديدة ويضيف الأصدقاء تلقائياً لـ workers_config.yaml
 name: Xandra Worker Registrar
+
 on:
   issues:
     types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
 jobs:
   register:
     runs-on: ubuntu-latest
@@ -9,26 +17,48 @@ jobs:
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
+      
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      
       - name: 📦 Install dependencies
         run: pip install -q pyyaml requests
+      
       - name: 📝 Process Registration
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
         run: python maestro/process_registration.py
+      
       - name: ✅ Close Issue
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments -d '{"body":"✅ تمت معالجة طلبك بنجاح وإضافتك للنظام! شكراً لك."}'
-          curl -X PATCH -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER -d '{"state":"closed"}'
+          curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments \
+            -d '{"body":"✅ تمت معالجة طلبك بنجاح وإضافتك للنظام! شكراً لك."}'
+          
+          curl -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER \
+            -d '{"state":"closed"}'
+      
+      - name: ❌ Comment on Failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments \
+            -d '{"body":"❌ حدث خطأ أثناء معالجة طلبك. يرجى المحاولة مرة أخرى أو التواصل مع الإدارة."}'
