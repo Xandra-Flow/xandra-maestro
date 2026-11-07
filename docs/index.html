@@ -322,8 +322,10 @@
                 const fileData = await fileResponse.json();
                 const sha = fileData.sha;
                 
-                // فك الترميز
-                const content = atob(fileData.content);
+                // فك الترميز (دعم UTF-8 / الحروف العربية)
+                const base64Content = fileData.content;
+                const decodedBytes = Uint8Array.from(atob(base64Content), c => c.charCodeAt(0));
+                const content = new TextDecoder('utf-8').decode(decodedBytes);
                 
                 // إضافة الـ Worker الجديد
                 const newWorkerEntry = 
