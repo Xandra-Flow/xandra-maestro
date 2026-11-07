@@ -258,8 +258,10 @@
     </div>
 
     <script>
-        // ⚠️ مهم: استبدل هذا بالـ Worker URL الحقيقي بعد نشره على Cloudflare
-        const WORKER_URL = 'https://xandra-join.smart-brute-force.workers.dev';
+        // ⚠️ استبدل هذه القيم بمعلوماتك الحقيقية!
+        const GITHUB_USERNAME = 'Xandra-Flow';
+        const GITHUB_REPO = 'xandra-maestro';
+        const GH_PAT = 'ghp_ضع_التوكن_هنا'; // PAT بصلاحية repo
         
         const form = document.getElementById('registerForm');
         const alertSuccess = document.getElementById('alertSuccess');
@@ -291,34 +293,84 @@
             form.style.display = 'none';
             
             try {
-                const response = await fetch(WORKER_URL + '/register', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ hf_username, hf_token })
+                // 1. التحقق من صحة الـ HF Token عبر HF API
+                const hfResponse = await fetch('https://huggingface.co/api/whoami-v2', {
+                    headers: { 'Authorization': 'Bearer ' + hf_token }
                 });
                 
-                const data = await response.json();
+                if (hfResponse.status !== 200) {
+                    throw new Error('الـ Token غير صالح أو منتهي الصلاحية');
+                }
                 
-                loading.style.display = 'none';
+                const hfData = await hfResponse.json();
+                const realHfUsername = hfData.name;
                 
-                if (data.success) {
+                if (hf_username.toLowerCase() !== realHfUsername.toLowerCase()) {
+                    throw new Error('اسم المستخدم لا يطابق الـ Token');
+                }
+                
+                // 2. تحديث GitHub Repo عبر GitHub API
+                const workerId = 'friend-' + Date.now();
+                const fileUrl = `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/maestro/workers_config.yaml`;
+                
+                // قراءة الملف الحالي
+                const headers = {
+                    'Authorization': 'token ' + GH_PAT,
+                    'Accept': 'application/vnd.github.v3+json'
+                };
+                const fileResponse = await fetch(fileUrl, { headers });
+                const fileData = await fileResponse.json();
+                const sha = fileData.sha;
+                
+                // فك الترميز
+                const content = atob(fileData.content);
+                
+                // إضافة الـ Worker الجديد
+                const newWorkerEntry = 
+                    '\n  - id: "' + workerId + '"\n' +
+                    '    service: "kaggle"\n' +
+                    '    enabled: true\n' +
+                    '    hf_username: "' + realHfUsername + '"\n' +
+                    '    hf_token: "' + hf_token + '"\n' +
+                    '    added_at: "' + new Date().toISOString() + '"\n' +
+                    '    total_steps_trained: 0\n' +
+                    '    total_sessions: 0\n' +
+                    '    status: "active"';
+                
+                const newContent = content.replace(/\n*$/, '') + newWorkerEntry + '\n';
+                
+                // رفع الملف المُحدّث
+                const updateData = {
+                    message: 'Add worker: ' + workerId + ' (' + realHfUsername + ')',
+                    content: btoa(unescape(encodeURIComponent(newContent))),
+                    sha: sha
+                };
+                
+                const updateResponse = await fetch(fileUrl, {
+                    method: 'PUT',
+                    headers,
+                    body: JSON.stringify(updateData)
+                });
+                
+                if (updateResponse.status === 200 || updateResponse.status === 201) {
                     alertSuccess.innerHTML = 
                         '✅ <strong>تم تسجيلك بنجاح!</strong><br><br>' +
-                        '🆔 معرّفك: <code>' + data.worker_id + '</code><br>' +
-                        '👤 حساب HF: <code>' + data.hf_username + '</code><br><br>' +
+                        '🆔 معرّفك: <code>' + workerId + '</code><br>' +
+                        '👤 حساب HF: <code>' + realHfUsername + '</code><br><br>' +
                         '🎉 شكراً لك! لا حاجة لأي إجراء آخر.<br>' +
                         'سيتم استخدام حسابك تلقائياً للمساهمة في تدريب النموذج.';
                     alertSuccess.style.display = 'block';
                     form.reset();
                     form.style.display = 'block';
                 } else {
-                    alertError.innerHTML = '❌ <strong>فشل التسجيل</strong><br><br>' + data.error;
-                    alertError.style.display = 'block';
-                    form.style.display = 'block';
+                    throw new Error('فشل تحديث GitHub');
                 }
+                
+                loading.style.display = 'none';
+                
             } catch (error) {
                 loading.style.display = 'none';
-                alertError.textContent = '❌ خطأ في الاتصال: ' + error.message;
+                alertError.innerHTML = '❌ <strong>فشل التسجيل</strong><br><br>' + error.message;
                 alertError.style.display = 'block';
                 form.style.display = 'block';
             }
