@@ -1,32 +1,20 @@
-# سجل Workers في النظام
-# كل Worker جديد يُضاف هنا تلقائياً عبر البوت
-
 workers:
-  # ─────────────────────────────────────
-  # المالك (أنت)
-  # ─────────────────────────────────────
-  - id: "owner"
-    service: "kaggle"
-    enabled: true
-    hf_username: "smart-force"
-    telegram_user_id: 6194697593
-    telegram_username: "owner"
-    added_at: "2026-11-06"
-    total_steps_trained: 0
-    total_sessions: 0
-    status: "active"
-
-  # ─────────────────────────────────────
-  # الأصدقاء (يُضافون تلقائياً عبر البوت)
-  # ─────────────────────────────────────
-  # مثال:
-  # - id: "friend-123456789"
-  #   service: "kaggle"
-  #   enabled: true
-  #   hf_username: "friend_username"
-  #   telegram_user_id: 123456789
-  #   telegram_username: "friend"
-  #   added_at: "2026-11-07"
-  #   total_steps_trained: 0
-  #   total_sessions: 0
-  #   status: "active"
+- added_at: '2026-11-06'
+  enabled: true
+  hf_username: smart-force
+  id: owner
+  service: kaggle
+  status: active
+  telegram_user_id: 6194697593
+  telegram_username: owner
+  total_sessions: 0
+  total_steps_trained: 0
+- added_at: '2026-11-07T05:32:47.540379'
+  enabled: true
+  hf_token: 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
+  hf_username: xf-ai
+  id: friend-1794029547284
+  service: kaggle
+  status: active
+  total_sessions: 0
+  total_steps_trained: 0
