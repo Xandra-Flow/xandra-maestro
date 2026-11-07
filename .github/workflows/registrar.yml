@@ -1,5 +1,4 @@
 # Xandra Worker Registrar
-# يستمع للـ Issues الجديدة ويضيف الأصدقاء تلقائياً لـ workers_config.yaml
 name: Xandra Worker Registrar
 
 on:
@@ -29,7 +28,6 @@ jobs:
       - name: 📝 Process Registration
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -44,21 +42,10 @@ jobs:
         run: |
           curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments \
+            https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments \
             -d '{"body":"✅ تمت معالجة طلبك بنجاح وإضافتك للنظام! شكراً لك."}'
           
           curl -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER \
+            https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER \
             -d '{"state":"closed"}'
-      
-      - name: ❌ Comment on Failure
-        if: failure()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments \
-            -d '{"body":"❌ حدث خطأ أثناء معالجة طلبك. يرجى المحاولة مرة أخرى أو التواصل مع الإدارة."}'
