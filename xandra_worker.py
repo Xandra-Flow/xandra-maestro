@@ -1,15 +1,24 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║   Xandra Hope - Kaggle Worker (Streaming Edition)              ║
-║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
+║   Xandra Hope - Kaggle Worker (Streaming + Long Session)      ║
+║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &              ║
 ║                  Александра Евгеньевна Острикова              ║
-║   All Rights Reserved.                                         ║
+║   All Rights Reserved.                                        ║
 ║                                                               ║
 ║   License: XHNSL v1.0                                         ║
 ║   Contact: ahmed.kamel@xandraflow.com                         ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
+
+هذا الكود يعمل على Kaggle تلقائياً (عندما يطلقه المايسترو)
+أو يدوياً (عندما تضغط Run All).
+
+المميزات:
+1. آلية القفل الذكي (Smart Lock) لمنع التعارض
+2. نظام التدفق (Streaming) لقراءة ملايين النصوص
+3. جلسات طويلة (11 ساعة متواصلة)
+4. حفظ checkpoint كل 500 خطوة
 """
 
 # ===================================================
@@ -37,13 +46,13 @@ from datetime import datetime, timedelta
 from huggingface_hub import HfApi, hf_hub_download, upload_file
 
 print("=" * 60)
-print("🎯 Xandra Hope - Kaggle Worker (Streaming Edition)")
+print("🎯 Xandra Hope - Kaggle Worker (Streaming + Long Session)")
 print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
 print("=" * 60)
 
 # ===================================================
-# 2. قراءة الـ Tokens
+# 2. قراءة الـ Tokens من Kaggle Secrets
 # ===================================================
 try:
     from kaggle_secrets import UserSecretsClient
@@ -205,20 +214,28 @@ print("\n🌐 تهيئة نظام التدفق (Streaming) للبيانات ال
 from datasets import load_dataset
 
 try:
-    # تحميل الداتا في وضع التدفق (لا يستهلك الرام)
     stream_dataset = load_dataset("wikimedia/wikipedia", "20231101.ar", split="train", streaming=True)
+    stream_iter = iter(stream_dataset)
     
-    # دالة لجلب Batch جديد من التدفق
     def get_streaming_batch(batch_size=32, max_len=128):
         texts = []
-        for item in stream_dataset:
+        for item in stream_iter:
             if len(texts) >= batch_size:
                 break
-            text = item['text']
-            if len(text) > 50:  # تجاهل النصوص القصيرة جداً
+            text = item.get('text', '')
+            if len(text) > 50:
                 texts.append(text)
         
-        # تحويل لـ tokens
+        if len(texts) < batch_size:
+            # لو انتهت البيانات، نعيد التكرار
+            stream_iter = iter(stream_dataset)
+            for item in stream_iter:
+                if len(texts) >= batch_size:
+                    break
+                text = item.get('text', '')
+                if len(text) > 50:
+                    texts.append(text)
+        
         batch = []
         for text in texts:
             tokens = tokenizer(text, return_tensors='pt', padding='max_length',
@@ -226,7 +243,7 @@ try:
             batch.append(tokens)
         return torch.stack(batch)
     
-    print("✅ نظام التدفق جاهز! (سياستهب ملايين النصوص دون ملء الذاكرة)")
+    print("✅ نظام التدفق جاهز! (سيقرأ ملايين النصوص دون ملء الذاكرة)")
     STREAMING_READY = True
 except Exception as e:
     print(f"⚠️ فشل إعداد التدفق: {e}")
@@ -234,17 +251,25 @@ except Exception as e:
     texts = [
         'العمارة الإسلامية فن راقٍ يمتد عبر القرون',
         'البرمجة العكسية تحليل البرمجيات لفهم آلية عملها',
+        'الهندسة العكسية تستخرج التصميم من المنتج النهائي',
+        'اللغة العربية لغة غنية بالمفردات والتراكيب',
+        'العلوم الرياضية أساس التطور التكنولوجي',
+        'الحضارة المصرية القديمة من أعرق الحضارات',
+        'الطب عند العرب كان متقدماً في العصور الوسطى',
+        'الفلسفة العربية أثرت في الفكر العالمي',
+        'الكيمياء نشأت عند العرب والمسلمين',
+        'الفلك علم درسه العرب بعمق',
     ] * 100
     STREAMING_READY = False
 
 # ===================================================
-# 10. حلقة التدريب (تعمل بشكل مستمر)
+# 10. حلقة التدريب (جلسة طويلة - 11 ساعة)
 # ===================================================
-MAX_STEPS = 500
+MAX_STEPS = 1000000        # رقم كبير جداً لكي لا يتوقف بسبب الخطوات
 BATCH_SIZE = 32
 LEARNING_RATE = 3e-4
-SAVE_EVERY = 50
-MAX_TIME_MINUTES = 700
+SAVE_EVERY = 500           # حفظ كل 500 خطوة
+MAX_TIME_MINUTES = 650     # حوالي 11 ساعة (أقل من حد كاجل 12 ساعة بأمان)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_STEPS)
@@ -255,6 +280,7 @@ start_time = time.time()
 losses = []
 
 print(f"\n🚀 بدء التدريب من الخطوة {step}")
+print(f"⏱️ الحد الزمني: {MAX_TIME_MINUTES} دقيقة ({MAX_TIME_MINUTES/60:.1f} ساعة)")
 print("=" * 60)
 
 for i in range(MAX_STEPS):
@@ -265,10 +291,17 @@ for i in range(MAX_STEPS):
     
     # جلب بيانات جديدة في كل خطوة (Streaming)
     if STREAMING_READY:
-        batch = get_streaming_batch(BATCH_SIZE).to(device)
+        try:
+            batch = get_streaming_batch(BATCH_SIZE).to(device)
+        except:
+            batch = get_streaming_batch(BATCH_SIZE).to(device)
     else:
         indices = torch.randint(0, len(texts), (BATCH_SIZE,))
-        batch = torch.stack([tokenizer(t, return_tensors='pt', padding='max_length', truncation=True, max_length=128)['input_ids'][0] for t in [texts[idx] for idx in indices]]).to(device)
+        batch = torch.stack([
+            tokenizer(texts[idx], return_tensors='pt', padding='max_length',
+                     truncation=True, max_length=128)['input_ids'][0]
+            for idx in indices
+        ]).to(device)
     
     logits, loss = model(batch, targets=batch)
     optimizer.zero_grad()
@@ -281,9 +314,12 @@ for i in range(MAX_STEPS):
     
     if i % 10 == 0:
         avg_loss = sum(losses[-10:]) / min(10, len(losses))
-        progress = (i / MAX_STEPS) * 100
+        progress = (step / state['target_steps']) * 100
+        elapsed_min = (time.time() - start_time) / 60
+        remaining_min = MAX_TIME_MINUTES - elapsed_min
         print(f"[{datetime.now().strftime('%H:%M:%S')}] خطوة {step} | "
-              f"loss: {loss.item():.4f} | avg: {avg_loss:.4f} | {progress:.1f}%")
+              f"loss: {loss.item():.4f} | avg: {avg_loss:.4f} | "
+              f"progress: {progress:.2f}% | remaining: {remaining_min:.0f}m")
     
     if i % SAVE_EVERY == 0 and i > 0:
         checkpoint = {
