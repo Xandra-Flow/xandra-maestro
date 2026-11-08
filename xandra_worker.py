@@ -1,7 +1,7 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║   Xandra Hope - Kaggle Worker (Real Data Edition)             ║
+║   Xandra Hope - Kaggle Worker (Streaming Edition)              ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
 ║                  Александра Евгеньевна Острикова              ║
 ║   All Rights Reserved.                                         ║
@@ -37,13 +37,13 @@ from datetime import datetime, timedelta
 from huggingface_hub import HfApi, hf_hub_download, upload_file
 
 print("=" * 60)
-print("🎯 Xandra Hope - Kaggle Worker (Real Data Edition)")
+print("🎯 Xandra Hope - Kaggle Worker (Streaming Edition)")
 print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
 print("=" * 60)
 
 # ===================================================
-# 2. قراءة الـ Tokens من Kaggle Secrets
+# 2. قراءة الـ Tokens
 # ===================================================
 try:
     from kaggle_secrets import UserSecretsClient
@@ -51,7 +51,7 @@ try:
     HF_TOKEN = secrets.get_secret("HF_TOKEN")
     HF_REPO = secrets.get_secret("HF_REPO")
 except:
-    HF_TOKEN = os.environ.get("HF_TOKEN", "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")
+    HF_TOKEN = os.environ.get("HF_TOKEN", "ضع_hf_token_هنا")
     HF_REPO = os.environ.get("HF_REPO", "smart-force/xandra-training-state")
 
 os.environ['HF_TOKEN'] = HF_TOKEN
@@ -183,7 +183,7 @@ if not acquire_lock():
     sys.exit(0)
 
 # ===================================================
-# 8. بناء النموذج وتحميل البيانات الحقيقية
+# 8. بناء النموذج وتحميل Tokenizer
 # ===================================================
 print("\n🏗️ بناء Xandra-Tiny...")
 model = XandraTiny().to(device)
@@ -198,66 +198,47 @@ print("\n📚 تحميل Tokenizer...")
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
-# تحميل البيانات العربية الحقيقية من Hugging Face
-print("\n🌐 تحميل البيانات العربية الحقيقية من Hugging Face...")
+# ===================================================
+# 9. نظام التدفق (Streaming) لتحميل البيانات
+# ===================================================
+print("\n🌐 تهيئة نظام التدفق (Streaming) للبيانات العربية...")
 from datasets import load_dataset
 
 try:
-    # محاولة 1: wikimedia/wikipedia (النسخة الجديدة)
-    print("⏳ تحميل ويكيبيديا العربية (wikimedia/wikipedia)...")
-    dataset = load_dataset("wikimedia/wikipedia", "20231101.ar", split="train[:5000]")
-    texts = [item['text'] for item in dataset]
-    print(f"✅ تم تحميل {len(texts)} مقال عربي")
-except Exception as e1:
-    print(f"⚠️ فشل wikimedia/wikipedia: {e1}")
-    try:
-        # محاولة 2: oscar (نصوص عربية من الإنترنت)
-        print("⏳ تحميل OSCAR العربية...")
-        dataset = load_dataset("oscar-corpus/OSCAR-2301", "ar", split="train[:5000]")
-        texts = [item['text'] for item in dataset]
-        print(f"✅ تم تحميل {len(texts)} نص عربي")
-    except Exception as e2:
-        print(f"⚠️ فشل OSCAR: {e2}")
-        try:
-            # محاولة 3: FineWeb Arabic
-            print("⏳ تحميل FineWeb العربية...")
-            dataset = load_dataset("HuggingFaceFW/fineweb", "arb_Arab", split="train[:5000]")
-            texts = [item['text'] for item in dataset]
-            print(f"✅ تم تحميل {len(texts)} نص عربي")
-        except Exception as e3:
-            print(f"⚠️ فشل FineWeb: {e3}")
-            print("⏳ تحميل بيانات احتياطية...")
-            texts = [
-                'العمارة الإسلامية فن راقٍ يمتد عبر القرون',
-                'البرمجة العكسية تحليل البرمجيات لفهم آلية عملها',
-                'الهندسة العكسية تستخرج التصميم من المنتج النهائي',
-                'اللغة العربية لغة غنية بالمفردات والتراكيب',
-                'العلوم الرياضية أساس التطور التكنولوجي',
-                'الحضارة المصرية القديمة من أعرق الحضارات',
-                'الطب عند العرب كان متقدماً في العصور الوسطى',
-                'الفلسفة العربية أثرت في الفكر العالمي',
-                'الكيمياء نشأت عند العرب والمسلمين',
-                'الفلك علم درسه العرب بعمق',
-            ] * 100
-            print(f"✅ تم تحميل {len(texts)} نص احتياطي")
-
-# تجهيز البيانات للتدريب
-def encode_texts(texts, tokenizer, max_len=128):
-    """تحويل النصوص إلى tokens"""
-    all_tokens = []
-    for text in texts:
-        # نأخذ أول 128 توكن من كل مقال
-        tokens = tokenizer(text, return_tensors='pt', padding='max_length',
-                          truncation=True, max_length=max_len)['input_ids'][0]
-        all_tokens.append(tokens)
-    return torch.stack(all_tokens)
-
-print("\n⚙️ معالجة البيانات...")
-data = encode_texts(texts, tokenizer).to(device)
-print(f"✅ شكل البيانات النهائي: {data.shape}")
+    # تحميل الداتا في وضع التدفق (لا يستهلك الرام)
+    stream_dataset = load_dataset("wikimedia/wikipedia", "20231101.ar", split="train", streaming=True)
+    
+    # دالة لجلب Batch جديد من التدفق
+    def get_streaming_batch(batch_size=32, max_len=128):
+        texts = []
+        for item in stream_dataset:
+            if len(texts) >= batch_size:
+                break
+            text = item['text']
+            if len(text) > 50:  # تجاهل النصوص القصيرة جداً
+                texts.append(text)
+        
+        # تحويل لـ tokens
+        batch = []
+        for text in texts:
+            tokens = tokenizer(text, return_tensors='pt', padding='max_length',
+                              truncation=True, max_length=max_len)['input_ids'][0]
+            batch.append(tokens)
+        return torch.stack(batch)
+    
+    print("✅ نظام التدفق جاهز! (سياستهب ملايين النصوص دون ملء الذاكرة)")
+    STREAMING_READY = True
+except Exception as e:
+    print(f"⚠️ فشل إعداد التدفق: {e}")
+    print("⏳ العودة للبيانات الاحتياطية...")
+    texts = [
+        'العمارة الإسلامية فن راقٍ يمتد عبر القرون',
+        'البرمجة العكسية تحليل البرمجيات لفهم آلية عملها',
+    ] * 100
+    STREAMING_READY = False
 
 # ===================================================
-# 9. حلقة التدريب
+# 10. حلقة التدريب (تعمل بشكل مستمر)
 # ===================================================
 MAX_STEPS = 500
 BATCH_SIZE = 32
@@ -282,8 +263,12 @@ for i in range(MAX_STEPS):
         print(f"⏰ انتهى الوقت ({elapsed:.1f} دقيقة)")
         break
     
-    indices = torch.randint(0, len(data), (BATCH_SIZE,))
-    batch = data[indices]
+    # جلب بيانات جديدة في كل خطوة (Streaming)
+    if STREAMING_READY:
+        batch = get_streaming_batch(BATCH_SIZE).to(device)
+    else:
+        indices = torch.randint(0, len(texts), (BATCH_SIZE,))
+        batch = torch.stack([tokenizer(t, return_tensors='pt', padding='max_length', truncation=True, max_length=128)['input_ids'][0] for t in [texts[idx] for idx in indices]]).to(device)
     
     logits, loss = model(batch, targets=batch)
     optimizer.zero_grad()
@@ -324,7 +309,7 @@ print("=" * 60)
 print(f"✅ انتهى التدريب عند الخطوة {step}")
 
 # ===================================================
-# 10. حفظ النتائج النهائية وتحرير القفل
+# 11. حفظ النتائج النهائية وتحرير القفل
 # ===================================================
 if losses:
     final_loss = losses[-1]
