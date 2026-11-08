@@ -51,7 +51,7 @@ try:
     HF_TOKEN = secrets.get_secret("HF_TOKEN")
     HF_REPO = secrets.get_secret("HF_REPO")
 except:
-    HF_TOKEN = os.environ.get("HF_TOKEN", "ضع_hf_token_هنا")
+    HF_TOKEN = os.environ.get("HF_TOKEN", "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")
     HF_REPO = os.environ.get("HF_REPO", "smart-force/xandra-training-state")
 
 os.environ['HF_TOKEN'] = HF_TOKEN
