@@ -1,4 +1,4 @@
-# Xandra Maestro - كل ساعة
+# Xandra Maestro - Multi-Account Edition (كل ساعة)
 name: Xandra Maestro
 
 on:
@@ -21,29 +21,41 @@ jobs:
           python-version: '3.11'
       
       - name: 📦 Install dependencies
-        run: pip install -q requests huggingface_hub pyyaml
+        run: |
+          pip install -q requests huggingface_hub pyyaml
+          pip install -q kaggle
       
-      - name: 🎵 Run Maestro
+      - name: 🎵 Run Maestro (Multi-Account)
         env:
           HF_REPO: ${{ secrets.HF_REPO }}
           HF_TOKEN_OWNER: ${{ secrets.HF_TOKEN_OWNER }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
+          
+          # الحساب 1
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          
+          # الحساب 2
+          KAGGLE_USERNAME_2: ${{ secrets.KAGGLE_USERNAME_2 }}
+          KAGGLE_KEY_2: ${{ secrets.KAGGLE_KEY_2 }}
+          
+          # الحساب 3
+          KAGGLE_USERNAME_3: ${{ secrets.KAGGLE_USERNAME_3 }}
+          KAGGLE_KEY_3: ${{ secrets.KAGGLE_KEY_3 }}
+          
+          # الحساب 4
+          KAGGLE_USERNAME_4: ${{ secrets.KAGGLE_USERNAME_4 }}
+          KAGGLE_KEY_4: ${{ secrets.KAGGLE_KEY_4 }}
+          
+          # الحساب 5
+          KAGGLE_USERNAME_5: ${{ secrets.KAGGLE_USERNAME_5 }}
+          KAGGLE_KEY_5: ${{ secrets.KAGGLE_KEY_5 }}
+          
+          # الحساب 6
+          KAGGLE_USERNAME_6: ${{ secrets.KAGGLE_USERNAME_6 }}
+          KAGGLE_KEY_6: ${{ secrets.KAGGLE_KEY_6 }}
+          
+          # Gmail
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: python maestro/maestro.py
-      
-      - name: 🚨 Alert on Failure
-        if: failure()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
-        run: |
-          MESSAGE="🚨 *فشل Maestro في GitHub Actions*
-          
-          🔗 https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
-          
-          ⏰ $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          
-          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-            -d chat_id="$OWNER_CHAT_ID" \
-            -d text="$MESSAGE" \
-            -d parse_mode="Markdown"
