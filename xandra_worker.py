@@ -1,7 +1,7 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║   Xandra Hope - Kaggle Worker (Streaming + Long Session)      ║
+║   Xandra Hope - Kaggle Worker (Shamela + Wikipedia + Web)     ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &              ║
 ║                  Александра Евгеньевна Острикова              ║
 ║   All Rights Reserved.                                        ║
@@ -11,14 +11,10 @@
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 
-هذا الكود يعمل على Kaggle تلقائياً (عندما يطلقه المايسترو)
-أو يدوياً (عندما تضغط Run All).
-
-المميزات:
-1. آلية القفل الذكي (Smart Lock) لمنع التعارض
-2. نظام التدفق (Streaming) لقراءة ملايين النصوص
-3. جلسات طويلة (11 ساعة متواصلة)
-4. حفظ checkpoint كل 500 خطوة
+مصادر البيانات:
+1. المكتبة الشاملة (Shamela) - 8000+ كتاب عربي
+2. ويكيبيديا العربية - مقالات علمية وتاريخية
+3. FineWeb Arabic - صفحات ويب عربية نظيفة
 """
 
 # ===================================================
@@ -46,7 +42,7 @@ from datetime import datetime, timedelta
 from huggingface_hub import HfApi, hf_hub_download, upload_file
 
 print("=" * 60)
-print("🎯 Xandra Hope - Kaggle Worker (Streaming + Long Session)")
+print("🎯 Xandra Hope - Kaggle Worker (Shamela + Wikipedia + Web)")
 print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
 print("=" * 60)
@@ -208,68 +204,107 @@ from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
 # ===================================================
-# 9. نظام التدفق (Streaming) لتحميل البيانات
+# 9. نظام التدفق المتعدد المصادر (Multi-Source Streaming)
 # ===================================================
-print("\n🌐 تهيئة نظام التدفق (Streaming) للبيانات العربية...")
-from datasets import load_dataset
+print("\n🌐 تهيئة نظام التدفق متعدد المصادر...")
+from datasets import load_dataset, interleave_datasets
 
+stream_datasets = []
+
+# --- المصدر 1: المكتبة الشاملة (Shamela) ---
 try:
-    stream_dataset = load_dataset("wikimedia/wikipedia", "20231101.ar", split="train", streaming=True)
-    stream_iter = iter(stream_dataset)
-    
-    def get_streaming_batch(batch_size=32, max_len=128):
-        texts = []
-        for item in stream_iter:
-            if len(texts) >= batch_size:
-                break
-            text = item.get('text', '')
-            if len(text) > 50:
-                texts.append(text)
-        
-        if len(texts) < batch_size:
-            # لو انتهت البيانات، نعيد التكرار
-            stream_iter = iter(stream_dataset)
-            for item in stream_iter:
-                if len(texts) >= batch_size:
-                    break
-                text = item.get('text', '')
-                if len(text) > 50:
-                    texts.append(text)
-        
-        batch = []
-        for text in texts:
-            tokens = tokenizer(text, return_tensors='pt', padding='max_length',
-                              truncation=True, max_length=max_len)['input_ids'][0]
-            batch.append(tokens)
-        return torch.stack(batch)
-    
-    print("✅ نظام التدفق جاهز! (سيقرأ ملايين النصوص دون ملء الذاكرة)")
-    STREAMING_READY = True
+    print("⏳ تحميل المكتبة الشاملة (Shamela)...")
+    shamela = load_dataset(
+        "ReligiousLLMs/shamela_all_diacritized_fully",
+        split="train",
+        streaming=True
+    )
+    stream_datasets.append(shamela)
+    print("✅ الشاملة جاهزة!")
 except Exception as e:
-    print(f"⚠️ فشل إعداد التدفق: {e}")
-    print("⏳ العودة للبيانات الاحتياطية...")
+    print(f"⚠️ فشل تحميل الشاملة: {e}")
+
+# --- المصدر 2: ويكيبيديا العربية ---
+try:
+    print("⏳ تحميل ويكيبيديا العربية...")
+    wiki = load_dataset(
+        "wikimedia/wikipedia",
+        "20231101.ar",
+        split="train",
+        streaming=True
+    )
+    stream_datasets.append(wiki)
+    print("✅ ويكيبيديا جاهزة!")
+except Exception as e:
+    print(f"⚠️ فشل تحميل ويكيبيديا: {e}")
+
+# --- المصدر 3: FineWeb العربي ---
+try:
+    print("⏳ تحميل FineWeb العربي...")
+    fineweb = load_dataset(
+        "HuggingFaceFW/fineweb",
+        "arb_Arab",
+        split="train",
+        streaming=True
+    )
+    stream_datasets.append(fineweb)
+    print("✅ FineWeb جاهز!")
+except Exception as e:
+    print(f"⚠️ فشل تحميل FineWeb: {e}")
+
+# دمج المصادر (interleave)
+if len(stream_datasets) > 0:
+    # نعطي الشاملة وزناً أكبر (probabilities)
+    probs = [0.5] + [0.25] * (len(stream_datasets) - 1) if len(stream_datasets) > 1 else [1.0]
+    combined_stream = interleave_datasets(stream_datasets, probabilities=probs, seed=42)
+    stream_iter = iter(combined_stream)
+    STREAMING_READY = True
+    print(f"✅ تم دمج {len(stream_datasets)} مصدر بيانات!")
+    print("📊 التوزيع: الشاملة 50% + ويكيبيديا 25% + FineWeb 25%")
+else:
+    print("❌ فشل تحميل جميع المصادر! استخدام بيانات احتياطية.")
     texts = [
         'العمارة الإسلامية فن راقٍ يمتد عبر القرون',
         'البرمجة العكسية تحليل البرمجيات لفهم آلية عملها',
-        'الهندسة العكسية تستخرج التصميم من المنتج النهائي',
-        'اللغة العربية لغة غنية بالمفردات والتراكيب',
-        'العلوم الرياضية أساس التطور التكنولوجي',
-        'الحضارة المصرية القديمة من أعرق الحضارات',
-        'الطب عند العرب كان متقدماً في العصور الوسطى',
-        'الفلسفة العربية أثرت في الفكر العالمي',
-        'الكيمياء نشأت عند العرب والمسلمين',
-        'الفلك علم درسه العرب بعمق',
     ] * 100
     STREAMING_READY = False
+
+# دالة لجلب Batch جديد من التدفق
+def get_streaming_batch(batch_size=32, max_len=128):
+    texts = []
+    for item in stream_iter:
+        if len(texts) >= batch_size:
+            break
+        # استخراج النص من أي مفتاح متاح
+        text = item.get('text', item.get('content', item.get('nass', '')))
+        if text and len(str(text)) > 50:
+            texts.append(str(text))
+    
+    # لو لم نحصل على عدد كافٍ، نعيد التكرار
+    if len(texts) < batch_size:
+        stream_iter = iter(combined_stream)
+        for item in stream_iter:
+            if len(texts) >= batch_size:
+                break
+            text = item.get('text', item.get('content', item.get('nass', '')))
+            if text and len(str(text)) > 50:
+                texts.append(str(text))
+    
+    batch = []
+    for text in texts:
+        tokens = tokenizer(text, return_tensors='pt', padding='max_length',
+                          truncation=True, max_length=max_len)['input_ids'][0]
+        batch.append(tokens)
+    return torch.stack(batch)
 
 # ===================================================
 # 10. حلقة التدريب (جلسة طويلة - 11 ساعة)
 # ===================================================
-MAX_STEPS = 1000000        # رقم كبير جداً لكي لا يتوقف بسبب الخطوات
+MAX_STEPS = 1000000
 BATCH_SIZE = 32
 LEARNING_RATE = 3e-4
-SAVE_EVERY = 500           # حفظ كل 500 خطوة
-MAX_TIME_MINUTES = 650     # حوالي 11 ساعة (أقل من حد كاجل 12 ساعة بأمان)
+SAVE_EVERY = 500
+MAX_TIME_MINUTES = 650
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_STEPS)
@@ -289,11 +324,11 @@ for i in range(MAX_STEPS):
         print(f"⏰ انتهى الوقت ({elapsed:.1f} دقيقة)")
         break
     
-    # جلب بيانات جديدة في كل خطوة (Streaming)
     if STREAMING_READY:
         try:
             batch = get_streaming_batch(BATCH_SIZE).to(device)
         except:
+            stream_iter = iter(combined_stream)
             batch = get_streaming_batch(BATCH_SIZE).to(device)
     else:
         indices = torch.randint(0, len(texts), (BATCH_SIZE,))
