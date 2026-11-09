@@ -88,25 +88,23 @@ def acquire_lock(state, account_name):
 def get_real_kaggle_quota(username, key):
     """الاستعلام عن الحصة المتبقية الفعلية من كاجل (بالساعات)"""
     try:
-        # إنشاء ملف مؤقت للاعتماديات
-        os.makedirs("/root/.kaggle", exist_ok=True)
-        with open("/root/.kaggle/kaggle.json", "w") as f:
-            json.dump({"username": username, "key": key}, f)
-        os.chmod("/root/.kaggle/kaggle.json", 0o600)
-        
-        result = subprocess.run(
-            ["kaggle", "config", "view"], 
-            capture_output=True, text=True
+        # الـ API الرسمي لكاجل يعيد الثواني المتبقية كنص عادي (Plain Text)
+        response = requests.get(
+            'https://www.kaggle.com/api/v1/quota', 
+            auth=(username, key), 
+            timeout=15
         )
-        # استخدام API مباشر للحصول على الحصة
-        response = requests.get('https://www.kaggle.com/api/v1/quota', auth=(username, key), timeout=15)
         if response.status_code == 200:
-            seconds_left = int(response.text)
+            # كاجل قد تعيد المسافات، لذا نستخدم strip
+            seconds_left = int(response.text.strip())
             hours_left = seconds_left / 3600
             hours_used = WEEKLY_GPU_LIMIT_PER_ACCOUNT - hours_left
             return {"used": round(hours_used, 2), "remaining": round(hours_left, 2)}
-        return None
-    except:
+        else:
+            print(f"  ⚠️ خطأ HTTP {response.status_code} من كاجل: {response.text}")
+            return None
+    except Exception as e:
+        print(f"  ⚠️ استثناء أثناء جلب الحصة: {e}")
         return None
 
 def sync_account_quotas(state):
