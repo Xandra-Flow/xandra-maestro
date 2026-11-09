@@ -1,6 +1,6 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
-║   Xandra Hope - Maestro (Smart Load Balancer + Config Driven)  ║
+║   Xandra Hope - Maestro (Smart Load Balancer + Real Quota)    ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
 ║                  Александра Евгеньевна Острикова              ║
 ║   All Rights Reserved. License: XHNSL v1.0                   ║
@@ -85,42 +85,66 @@ def acquire_lock(state, account_name):
     }
     return state
 
+def get_real_kaggle_quota(username, key):
+    """الاستعلام عن الحصة المتبقية الفعلية من كاجل (بالساعات)"""
+    try:
+        # إنشاء ملف مؤقت للاعتماديات
+        os.makedirs("/root/.kaggle", exist_ok=True)
+        with open("/root/.kaggle/kaggle.json", "w") as f:
+            json.dump({"username": username, "key": key}, f)
+        os.chmod("/root/.kaggle/kaggle.json", 0o600)
+        
+        result = subprocess.run(
+            ["kaggle", "config", "view"], 
+            capture_output=True, text=True
+        )
+        # استخدام API مباشر للحصول على الحصة
+        response = requests.get('https://www.kaggle.com/api/v1/quota', auth=(username, key), timeout=15)
+        if response.status_code == 200:
+            seconds_left = int(response.text)
+            hours_left = seconds_left / 3600
+            hours_used = WEEKLY_GPU_LIMIT_PER_ACCOUNT - hours_left
+            return {"used": round(hours_used, 2), "remaining": round(hours_left, 2)}
+        return None
+    except:
+        return None
+
+def sync_account_quotas(state):
+    """تحديث أرقام الاستهلاك الحقيقية لكل الحسابات وكتابتها في state.json"""
+    print("🔄 جلب أرقام الاستهلاك الحقيقية من كاجل...")
+    account_usage = state.get("account_usage", {})
+    
+    for account in KAGGLE_ACCOUNTS:
+        username = account["username"]
+        quota = get_real_kaggle_quota(username, account["key"])
+        if quota:
+            print(f"  ✅ {username}: مستخدم {quota['used']}h | متبقي {quota['remaining']}h")
+            account_usage[username] = quota
+        else:
+            print(f"  ⚠️ فشل جلب بيانات {username}")
+            
+    state["account_usage"] = account_usage
+    return state
+
 def select_available_account(state):
     if not KAGGLE_ACCOUNTS: return None, 0, []
     
-    # استبعاد الحسابات المعطلة من قبل المستخدم
     disabled_accounts = state.get("disabled_accounts", [])
     active_accounts = [acc for acc in KAGGLE_ACCOUNTS if acc["username"] not in disabled_accounts]
     
     if not active_accounts: return None, 0, []
     
-    current_index = state.get("current_account_index", 0)
-    
-    # حساب الإحصائيات لكل حساب
     account_stats = []
-    now = datetime.now()
-    week_start = now - timedelta(days=now.weekday())
+    real_usage = state.get("account_usage", {})
     
     for acc in active_accounts:
         username = acc["username"]
-        weekly_hours = 0
-        total_sessions = 0
+        remaining = real_usage.get(username, {}).get("remaining", 30)
         
-        for session in state.get("history", []):
-            if username in session.get("worker_id", ""):
-                total_sessions += 1
-                try:
-                    session_time = datetime.fromisoformat(session["timestamp"].replace("Z", "+00:00"))
-                    if session_time > week_start:
-                        weekly_hours += session.get("gpu_hours", 0)
-                except: pass
-        
-        remaining = WEEKLY_GPU_LIMIT_PER_ACCOUNT - weekly_hours
         account_stats.append({
             "username": username,
             "remaining": remaining,
-            "weekly_hours": weekly_hours,
-            "sessions": total_sessions
+            "weekly_hours": real_usage.get(username, {}).get("used", 0)
         })
     
     # ترتيب الحسابات بناءً على أعلى ساعات متبقية
@@ -128,7 +152,6 @@ def select_available_account(state):
     
     if account_stats and account_stats[0]["remaining"] >= 2:
         best_account = account_stats[0]
-        # إيجاد الـ index الأصلي
         for i, acc in enumerate(KAGGLE_ACCOUNTS):
             if acc["username"] == best_account["username"]:
                 return KAGGLE_ACCOUNTS[i], best_account["remaining"], account_stats
@@ -162,9 +185,6 @@ def launch_kaggle_notebook(account):
         with open("xandra_worker.py", "w") as f:
             f.write(worker_code)
         
-        # التأكد من رفع ملف مصادر التدريب
-        # (يجب أن يكون موجوداً في نفس مجلد الـ Repo)
-        
         result = subprocess.run(["kaggle", "kernels", "status", f"{username}/xandra_worker"], capture_output=True, text=True)
         status_text = result.stdout.lower()
         if "complete" in status_text or "error" in status_text or "canceled" in status_text or "no kernels found" in status_text:
@@ -183,12 +203,18 @@ def launch_kaggle_notebook(account):
 def main():
     state = get_state()
     
+    # 1. تحديث أرقام الاستهلاك الحقيقية من كاجل
+    state = sync_account_quotas(state)
+    
     # تقرير حالة الحسابات
     result = select_available_account(state)
     if result and result[2]:
         print("📊 تقرير الحسابات:")
         for acc_stat in result[2]:
-            print(f"  - {acc_stat['username']}: {acc_stat['remaining']:.1f}h متبقية ({acc_stat['sessions']} جلسات)")
+            print(f"  - {acc_stat['username']}: {acc_stat['remaining']:.1f}h متبقية")
+    
+    # حفظ الحالة بعد تحديث الأرقام
+    update_state(state)
     
     is_locked, locked_by = check_lock(state)
     if is_locked:
