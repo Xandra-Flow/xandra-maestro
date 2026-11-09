@@ -1,31 +1,19 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
-║                                                               ║
 ║   Xandra Hope - Kaggle Worker (Ultimate Arabic Edition v2)    ║
-║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &              ║
+║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
 ║                  Александра Евгеньевна Острикова              ║
-║   All Rights Reserved.                                        ║
+║   All Rights Reserved.                                         ║
 ║                                                               ║
 ║   License: XHNSL v1.0                                         ║
 ║   Contact: ahmed.kamel@xandraflow.com                         ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
-
-مصادر البيانات (Kaggle + Hugging Face):
-1. المكتبة الشاملة (Shamela) - 8000+ كتاب
-2. ويكيبيديا العربية
-3. Arabic BERT Corpus
-4. Arabic Library
-5. Tashkeela (نصوص مشكولة)
-6. Best Arabic Poem (شعر عربي)
-7. Language Identification (تمييز اللغة)
-8. Two Million Rows Egyptian (عامية مصرية)
-9. Arabic Healthcare (رعاية صحية)
 """
 
-# ===================================================
-# 1. تثبيت المكتبات
-# ===================================================
+# هذا المتغير سيتم استبداله تلقائياً بواسطة المايسترو باسم المستخدم الحقيقي
+__KAGGLE_USERNAME__ = "manual_run"
+
 import subprocess
 import sys
 
@@ -37,7 +25,7 @@ install('transformers')
 install('huggingface_hub')
 install('accelerate')
 install('datasets')
-install('pandas') # مطلوب لقراءة ملفات CSV
+install('pandas')
 
 import os
 import json
@@ -50,15 +38,16 @@ from huggingface_hub import HfApi, hf_hub_download, upload_file
 import glob
 import pandas as pd
 
+# تسجيل وقت بدء الجلسة الفعلي (لحساب ساعات GPU بدقة كما يفعل كاجل)
+SESSION_START_TIME = time.time()
+
 print("=" * 60)
 print("🎯 Xandra Hope - Kaggle Worker (Ultimate Arabic Edition v2)")
+print(f"👤 Running on Account: {__KAGGLE_USERNAME__}")
 print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
 print("=" * 60)
 
-# ===================================================
-# 2. قراءة الـ Tokens من Kaggle Secrets
-# ===================================================
 try:
     from kaggle_secrets import UserSecretsClient
     secrets = UserSecretsClient()
@@ -71,79 +60,49 @@ except:
 os.environ['HF_TOKEN'] = HF_TOKEN
 os.environ['HF_HOME'] = '/tmp/huggingface'
 
-print(f"📁 HF Repo: {HF_REPO}")
-print(f"🔑 Token: {HF_TOKEN[:10]}...{HF_TOKEN[-4:]}")
-
-# ===================================================
-# 3. فحص GPU
-# ===================================================
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-if torch.cuda.is_available():
-    print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
-else:
-    print("❌ لا يوجد GPU!")
 
-# ===================================================
-# 4. آلية القفل الذكي (Smart Lock)
-# ===================================================
+# القفل الذكي
 LOCK_TIMEOUT_HOURS = 8
-WORKER_ID = f"kaggle-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+WORKER_ID = f"kaggle-{__KAGGLE_USERNAME__}"
 
 def acquire_lock():
     try:
         state_path = hf_hub_download(repo_id=HF_REPO, filename="state.json", repo_type="model", token=HF_TOKEN)
-        with open(state_path) as f:
-            state = json.load(f)
-        
+        with open(state_path) as f: state = json.load(f)
         lock = state.get('training_lock', {})
         if lock.get('is_locked'):
             expires_at = lock.get('expires_at')
             if expires_at:
                 expires_time = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                 if datetime.now(expires_time.tzinfo) > expires_time:
-                    print("⚠️ القفل منتهي الصلاحية، سيتم تجاوزه")
-                else:
-                    print(f"❌ النظام مشغول بواسطة: {lock.get('locked_by')}")
-                    return False
-        
+                    pass
+                else: return False
         state['training_lock'] = {
             'is_locked': True, 'locked_by': WORKER_ID,
             'locked_at': datetime.now().isoformat(),
             'expires_at': (datetime.now() + timedelta(hours=LOCK_TIMEOUT_HOURS)).isoformat()
         }
-        
-        with open('state.json', 'w') as f:
-            json.dump(state, f, indent=2, ensure_ascii=False)
+        with open('state.json', 'w') as f: json.dump(state, f, indent=2, ensure_ascii=False)
         upload_file(path_or_fileobj='state.json', path_in_repo='state.json', repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
-        print(f"✅ تم الحصول على القفل (ID: {WORKER_ID})")
         return True
-    except Exception as e:
-        print(f"⚠️ لا توجد حالة سابقة، بدء جديد: {e}")
-        return True
+    except: return True
 
 def release_lock(state_dict):
     try:
         state_dict['training_lock'] = {'is_locked': False, 'locked_by': None, 'locked_at': None, 'expires_at': None}
-        with open('state.json', 'w') as f:
-            json.dump(state_dict, f, indent=2, ensure_ascii=False)
+        with open('state.json', 'w') as f: json.dump(state_dict, f, indent=2, ensure_ascii=False)
         upload_file(path_or_fileobj='state.json', path_in_repo='state.json', repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
-        print("🔓 تم تحرير القفل")
-    except Exception as e:
-        print(f"⚠️ فشل تحرير القفل: {e}")
+    except: pass
 
-# ===================================================
-# 5. معمارية Xandra-Tiny
-# ===================================================
 class XandraTiny(nn.Module):
     def __init__(self, vocab_size=151646, dim=256, n_layers=4, n_heads=4):
         super().__init__()
         self.tok_emb = nn.Embedding(vocab_size, dim)
         self.pos_emb = nn.Embedding(128, dim)
         self.blocks = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=dim, nhead=n_heads, dim_feedforward=1024,
-                batch_first=True, activation='gelu'
-            ) for _ in range(n_layers)
+            nn.TransformerEncoderLayer(d_model=dim, nhead=n_heads, dim_feedforward=1024, batch_first=True, activation='gelu')
+            for _ in range(n_layers)
         ])
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, vocab_size, bias=False)
@@ -153,179 +112,98 @@ class XandraTiny(nn.Module):
         pos = torch.arange(T, device=idx.device).unsqueeze(0)
         x = self.tok_emb(idx) + self.pos_emb(pos)
         mask = nn.Transformer.generate_square_subsequent_mask(T).to(idx.device)
-        for block in self.blocks:
-            x = block(x, src_mask=mask)
+        for block in self.blocks: x = block(x, src_mask=mask)
         x = self.norm(x)
         logits = self.head(x)
         loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        if targets is not None: loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
-# ===================================================
-# 6. تحميل آخر checkpoint
-# ===================================================
 def load_state():
     try:
         path = hf_hub_download(repo_id=HF_REPO, filename="state.json", repo_type="model", token=HF_TOKEN)
-        with open(path) as f:
-            return json.load(f)
+        with open(path) as f: return json.load(f)
     except:
-        return {
-            "current_step": 0, "target_steps": 500000,
-            "current_loss": None, "history": [],
-            "best_loss": float('inf'), "updated_at": None,
-            "gpu_hours_used": 0, "training_lock": {"is_locked": False}
-        }
+        return {"current_step": 0, "target_steps": 500000, "current_loss": None, "history": [], "best_loss": float('inf'), "updated_at": None, "gpu_hours_used": 0, "training_lock": {"is_locked": False}}
 
 def load_checkpoint(model):
     try:
         path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/latest.pt", repo_type="model", token=HF_TOKEN)
         checkpoint = torch.load(path, map_location=device)
         model.load_state_dict(checkpoint['model_state'])
-        print(f"✅ تحميل checkpoint من الخطوة {checkpoint['step']}")
         return checkpoint['step']
-    except:
-        print("🆕 بدء تدريب من الصفر")
-        return 0
+    except: return 0
 
-# ===================================================
-# 7. الحصول على القفل
-# ===================================================
 if not acquire_lock():
     print("\n⛔ لا يمكن التدريب الآن. جلسة أخرى قيد التشغيل.")
     sys.exit(0)
 
-# ===================================================
-# 8. بناء النموذج وتحميل Tokenizer
-# ===================================================
-print("\n🏗️ بناء Xandra-Tiny...")
 model = XandraTiny().to(device)
-n_params = sum(p.numel() for p in model.parameters())
-print(f"📊 الباراميترات: {n_params:,} ({n_params/1e6:.2f}M)")
-
 state = load_state()
 last_step = load_checkpoint(model)
-print(f"📊 الخطوة الحالية: {state['current_step']}")
-
-print("\n📚 تحميل Tokenizer...")
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
-# ===================================================
-# 9. نظام التدفق متعدد المصادر (Multi-Source Streaming)
-# ===================================================
-print("\n🌐 تهيئة نظام التدفق متعدد المصادر (9 مصادر)...")
-from datasets import load_dataset, interleave_datasets
-
 all_texts = []
-
-# --- قراءة ملفات Kaggle المحلية مباشرة ---
-print("⏳ قراءة ملفات Kaggle Datasets المحلية...")
 kaggle_data_paths = [
-    "/kaggle/input/arabic-bert-corpus",
-    "/kaggle/input/arabic-library",
-    "/kaggle/input/tashkeela",
-    "/kaggle/input/best-arabic-poem-comprehensive-dataset",
-    "/kaggle/input/language-identification-datasst",
-    "/kaggle/input/two-million-rows-egyptian-datasets",
-    "/kaggle/input/arabic-healthcare"
+    "/kaggle/input/arabic-bert-corpus", "/kaggle/input/arabic-library", "/kaggle/input/tashkeela",
+    "/kaggle/input/best-arabic-poem-comprehensive-dataset", "/kaggle/input/language-identification-datasst",
+    "/kaggle/input/two-million-rows-egyptian-datasets", "/kaggle/input/arabic-healthcare"
 ]
 
 for path in kaggle_data_paths:
     if os.path.exists(path):
-        print(f"📂 تم العثور على: {path}")
         for filename in os.listdir(path):
             filepath = os.path.join(path, filename)
             try:
-                # قراءة ملفات TXT
                 if filename.endswith('.txt'):
                     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        paragraphs = content.split('\n')
-                        for p in paragraphs:
-                            if len(p) > 50:
-                                all_texts.append(p)
-                
-                # قراءة ملفات CSV (باستخدام pandas)
+                        for p in f.read().split('\n'):
+                            if len(p) > 50: all_texts.append(p)
                 elif filename.endswith('.csv'):
                     df = pd.read_csv(filepath, encoding='utf-8', on_bad_lines='skip')
-                    # نأخذ العمود الذي يحتوي على نصوص عربية
                     for col in df.columns:
                         if df[col].dtype == 'object':
                             for val in df[col].dropna():
-                                if len(str(val)) > 50:
-                                    all_texts.append(str(val))
-            except Exception as e:
-                print(f"⚠️ خطأ في قراءة {filename}: {e}")
+                                if len(str(val)) > 50: all_texts.append(str(val))
+            except: pass
 
-print(f"✅ تم تحميل {len(all_texts)} نص من Kaggle Datasets")
-
-# --- تحميل المصادر البعيدة (Hugging Face) ---
 stream_datasets = []
-
 try:
-    print("⏳ تحميل المكتبة الشاملة (Shamela)...")
     shamela = load_dataset("ReligiousLLMs/shamela_all_diacritized_fully", split="train", streaming=True)
     stream_datasets.append(shamela)
-    print("✅ الشاملة جاهزة!")
-except Exception as e:
-    print(f"⚠️ فشل تحميل الشاملة: {e}")
-
+except: pass
 try:
-    print("⏳ تحميل ويكيبيديا العربية...")
     wiki = load_dataset("wikimedia/wikipedia", "20231101.ar", split="train", streaming=True)
     stream_datasets.append(wiki)
-    print("✅ ويكيبيديا جاهزة!")
-except Exception as e:
-    print(f"⚠️ فشل تحميل ويكيبيديا: {e}")
+except: pass
 
 if len(stream_datasets) > 0:
     combined_stream = interleave_datasets(stream_datasets, probabilities=[0.5, 0.5], seed=42)
     stream_iter = iter(combined_stream)
     STREAMING_READY = True
-    print(f"✅ تم دمج {len(stream_datasets)} مصدر بيانات HF!")
 else:
     STREAMING_READY = False
+    all_texts = ['العمارة الإسلامية فن راقٍ يمتد عبر القرون'] * 100
 
-if len(all_texts) == 0 and not STREAMING_READY:
-    print("❌ لا توجد بيانات متاحة! استخدام بيانات احتياطية.")
-    all_texts = [
-        'العمارة الإسلامية فن راقٍ يمتد عبر القرون',
-        'البرمجة العكسية تحليل البرمجيات لفهم آلية عملها',
-    ] * 100
-
-# دالة لجلب Batch جديد
 def get_batch(batch_size=32, max_len=128):
     texts = []
-    
-    # 70% من Kaggle المحلية، 30% من HF Streaming
     use_stream = STREAMING_READY and (len(all_texts) == 0 or torch.rand(1).item() < 0.3)
-    
     if use_stream:
         for item in stream_iter:
-            if len(texts) >= batch_size:
-                break
+            if len(texts) >= batch_size: break
             text = item.get('text', item.get('content', item.get('nass', '')))
-            if text and len(str(text)) > 50:
-                texts.append(str(text))
-    
-    # إكمال المتبقي من البيانات المحلية
+            if text and len(str(text)) > 50: texts.append(str(text))
     if len(texts) < batch_size and len(all_texts) > 0:
         indices = torch.randint(0, len(all_texts), (batch_size - len(texts),))
-        for idx in indices:
-            texts.append(all_texts[idx])
+        for idx in indices: texts.append(all_texts[idx])
     
     batch = []
     for text in texts:
-        tokens = tokenizer(text, return_tensors='pt', padding='max_length',
-                          truncation=True, max_length=max_len)['input_ids'][0]
+        tokens = tokenizer(text, return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0]
         batch.append(tokens)
     return torch.stack(batch)
 
-# ===================================================
-# 10. حلقة التدريب (جلسة طويلة - 11 ساعة)
-# ===================================================
 MAX_STEPS = 1000000
 BATCH_SIZE = 32
 LEARNING_RATE = 3e-4
@@ -340,21 +218,12 @@ step = state['current_step']
 start_time = time.time()
 losses = []
 
-print(f"\n🚀 بدء التدريب من الخطوة {step}")
-print(f"⏱️ الحد الزمني: {MAX_TIME_MINUTES} دقيقة ({MAX_TIME_MINUTES/60:.1f} ساعة)")
-print("=" * 60)
-
 for i in range(MAX_STEPS):
     elapsed = (time.time() - start_time) / 60
-    if elapsed >= MAX_TIME_MINUTES:
-        print(f"⏰ انتهى الوقت ({elapsed:.1f} دقيقة)")
-        break
+    if elapsed >= MAX_TIME_MINUTES: break
     
-    try:
-        batch = get_batch(BATCH_SIZE).to(device)
-    except Exception as e:
-        print(f"⚠️ خطأ في جلب البيانات، إعادة المحاولة... ({e})")
-        continue
+    try: batch = get_batch(BATCH_SIZE).to(device)
+    except: continue
     
     logits, loss = model(batch, targets=batch)
     optimizer.zero_grad()
@@ -367,62 +236,21 @@ for i in range(MAX_STEPS):
     
     if i % 10 == 0:
         avg_loss = sum(losses[-10:]) / min(10, len(losses))
-        progress = (step / state['target_steps']) * 100
-        elapsed_min = (time.time() - start_time) / 60
-        remaining_min = MAX_TIME_MINUTES - elapsed_min
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] خطوة {step} | "
-              f"loss: {loss.item():.4f} | avg: {avg_loss:.4f} | "
-              f"progress: {progress:.2f}% | remaining: {remaining_min:.0f}m")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Step {step} | loss: {loss.item():.4f} | avg: {avg_loss:.4f}")
     
     if i % SAVE_EVERY == 0 and i > 0:
-        checkpoint = {
-            'model_state': model.state_dict(),
-            'optimizer_state': optimizer.state_dict(),
-            'step': step,
-            'loss': loss.item(),
-            'timestamp': datetime.now().isoformat(),
-            'authors': 'Ahmed Sayed Kamel Mahmoud & Александра Евгеньевна Острикова',
-            'copyright': '© 2026 Xandra Flow'
-        }
+        checkpoint = {'model_state': model.state_dict(), 'optimizer_state': optimizer.state_dict(), 'step': step, 'loss': loss.item(), 'timestamp': datetime.now().isoformat()}
         torch.save(checkpoint, 'latest.pt')
-        upload_file(
-            path_or_fileobj='latest.pt',
-            path_in_repo='checkpoints/latest.pt',
-            repo_id=HF_REPO,
-            repo_type="model",
-            token=HF_TOKEN
-        )
-        print(f"💾 تم حفظ checkpoint عند الخطوة {step}")
+        upload_file(path_or_fileobj='latest.pt', path_in_repo='checkpoints/latest.pt', repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
 
-print("=" * 60)
-print(f"✅ انتهى التدريب عند الخطوة {step}")
-
-# ===================================================
-# 11. حفظ النتائج النهائية وتحرير القفل
-# ===================================================
 if losses:
     final_loss = losses[-1]
-    
-    checkpoint = {
-        'model_state': model.state_dict(),
-        'optimizer_state': optimizer.state_dict(),
-        'step': step,
-        'loss': final_loss,
-        'timestamp': datetime.now().isoformat(),
-        'authors': 'Ahmed Sayed Kamel Mahmoud & Александра Евгеньевна Острикова',
-        'copyright': '© 2026 Xandra Flow'
-    }
+    checkpoint = {'model_state': model.state_dict(), 'optimizer_state': optimizer.state_dict(), 'step': step, 'loss': final_loss, 'timestamp': datetime.now().isoformat()}
     torch.save(checkpoint, 'latest.pt')
-    upload_file(
-        path_or_fileobj='latest.pt',
-        path_in_repo='checkpoints/latest.pt',
-        repo_id=HF_REPO,
-        repo_type="model",
-        token=HF_TOKEN
-    )
-    print(f"💾 تم حفظ checkpoint نهائي عند الخطوة {step}")
+    upload_file(path_or_fileobj='latest.pt', path_in_repo='checkpoints/latest.pt', repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
     
-    gpu_hours = (time.time() - start_time) / 3600
+    # حساب الوقت الفعلي للجلسة من بداية تشغيل السكريبت
+    gpu_hours = (time.time() - SESSION_START_TIME) / 3600
     
     state['current_step'] = step
     state['current_loss'] = final_loss
@@ -431,43 +259,16 @@ if losses:
     state['gpu_hours_used'] = state.get('gpu_hours_used', 0) + gpu_hours
     state['history'].append({
         'timestamp': datetime.now().isoformat(),
-        'final_step': step,
-        'final_loss': final_loss,
-        'steps_done': len(losses),
-        'gpu_hours': gpu_hours,
-        'worker_id': WORKER_ID
+        'final_step': step, 'final_loss': final_loss,
+        'steps_done': len(losses), 'gpu_hours': gpu_hours,
+        'worker_id': WORKER_ID  # سيسجل اسم الحساب الحقيقي
     })
+    if len(state['history']) > 50: state['history'] = state['history'][-50:]
     
-    if len(state['history']) > 50:
-        state['history'] = state['history'][-50:]
+    state['training_lock'] = {'is_locked': False, 'locked_by': None, 'locked_at': None, 'expires_at': None}
     
-    state['training_lock'] = {
-        'is_locked': False, 'locked_by': None,
-        'locked_at': None, 'expires_at': None
-    }
-    
-    with open('state.json', 'w') as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-    
-    upload_file(
-        path_or_fileobj='state.json',
-        path_in_repo='state.json',
-        repo_id=HF_REPO,
-        repo_type="model",
-        token=HF_TOKEN
-    )
-    
-    print(f"\n📊 تم تحديث state.json")
-    print(f"📈 الخطوة النهائية: {step}")
-    print(f"📉 الخسارة النهائية: {final_loss:.4f}")
-    print(f"🏆 أفضل خسارة: {state['best_loss']:.4f}")
-    print(f"⏱️ ساعات GPU المستهلكة: {gpu_hours:.2f}")
-    print("🔓 تم تحرير القفل")
+    with open('state.json', 'w') as f: json.dump(state, f, indent=2, ensure_ascii=False)
+    upload_file(path_or_fileobj='state.json', path_in_repo='state.json', repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
 else:
-    print("⚠️ لم يتم التدريب")
     state = load_state()
     release_lock(state)
-
-print("\n" + "=" * 60)
-print("© 2026 Xandra Flow - All Rights Reserved")
-print("✅ انتهى! اغلق المتصفح بأمان.")
