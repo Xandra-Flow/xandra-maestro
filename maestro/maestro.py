@@ -1,6 +1,6 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
-║   Xandra Hope - Maestro (Smart Load Balancer + Real Quota)    ║
+║   Xandra Hope - Maestro (Smart Load Balancer + Calculated Quota)║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
 ║                  Александра Евгеньевна Острикова              ║
 ║   All Rights Reserved. License: XHNSL v1.0                   ║
@@ -85,42 +85,49 @@ def acquire_lock(state, account_name):
     }
     return state
 
-def get_real_kaggle_quota(username, key):
-    """الاستعلام عن الحصة المتبقية الفعلية من كاجل (بالساعات)"""
-    try:
-        # الـ API الرسمي لكاجل يعيد الثواني المتبقية كنص عادي (Plain Text)
-        response = requests.get(
-            'https://www.kaggle.com/api/v1/quota', 
-            auth=(username, key), 
-            timeout=15
-        )
-        if response.status_code == 200:
-            # كاجل قد تعيد المسافات، لذا نستخدم strip
-            seconds_left = int(response.text.strip())
-            hours_left = seconds_left / 3600
-            hours_used = WEEKLY_GPU_LIMIT_PER_ACCOUNT - hours_left
-            return {"used": round(hours_used, 2), "remaining": round(hours_left, 2)}
-        else:
-            print(f"  ⚠️ خطأ HTTP {response.status_code} من كاجل: {response.text}")
-            return None
-    except Exception as e:
-        print(f"  ⚠️ استثناء أثناء جلب الحصة: {e}")
-        return None
-
 def sync_account_quotas(state):
-    """تحديث أرقام الاستهلاك الحقيقية لكل الحسابات وكتابتها في state.json"""
-    print("🔄 جلب أرقام الاستهلاك الحقيقية من كاجل...")
+    """حساب أرقام الاستهلاك الفعلية لكل حساب من سجل الجلسات (history)"""
+    print("🔄 حساب أرقام الاستهلاك الفعلية من السجل...")
     account_usage = state.get("account_usage", {})
     
-    for account in KAGGLE_ACCOUNTS:
-        username = account["username"]
-        quota = get_real_kaggle_quota(username, account["key"])
-        if quota:
-            print(f"  ✅ {username}: مستخدم {quota['used']}h | متبقي {quota['remaining']}h")
-            account_usage[username] = quota
-        else:
-            print(f"  ⚠️ فشل جلب بيانات {username}")
+    now = datetime.now()
+    week_start = now - timedelta(days=now.weekday())
+    week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # تهيئة الحسابات الحالية في الـ Secrets
+    for acc in KAGGLE_ACCOUNTS:
+        if acc["username"] not in account_usage:
+            account_usage[acc["username"]] = {"used": 0, "remaining": 30}
+    
+    # حساب الساعات الأسبوعية لكل حساب من الـ history
+    weekly_hours = {acc["username"]: 0 for acc in KAGGLE_ACCOUNTS}
+    
+    for session in state.get("history", []):
+        worker_id = session.get("worker_id", "")
+        gpu_hours = session.get("gpu_hours", 0)
+        timestamp_str = session.get("timestamp", "")
+        
+        account_name = None
+        if worker_id.startswith("kaggle-"):
+            account_name = worker_id[7:]
+        elif worker_id.startswith("maestro-"):
+            account_name = worker_id[8:]
             
+        if account_name and account_name in weekly_hours:
+            try:
+                session_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+                if session_time > week_start:
+                    weekly_hours[account_name] += gpu_hours
+            except: pass
+            
+    for username, hours_used in weekly_hours.items():
+        remaining = max(0, 30 - hours_used)
+        account_usage[username] = {
+            "used": round(hours_used, 2),
+            "remaining": round(remaining, 2)
+        }
+        print(f"  ✅ {username}: مستخدم {round(hours_used, 2)}h | متبقي {round(remaining, 2)}h")
+        
     state["account_usage"] = account_usage
     return state
 
@@ -201,7 +208,7 @@ def launch_kaggle_notebook(account):
 def main():
     state = get_state()
     
-    # 1. تحديث أرقام الاستهلاك الحقيقية من كاجل
+    # 1. تحديث أرقام الاستهلاك الحقيقية بحسابها من الـ history
     state = sync_account_quotas(state)
     
     # تقرير حالة الحسابات
