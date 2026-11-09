@@ -70,61 +70,120 @@ def send_email(subject, body):
 # ═══════════════════════════════════════════════════════════════
 
 def get_kaggle_config_dir():
-    """Returns a writable directory for kaggle.json (works on GitHub Actions, Kaggle, local)."""
-    # GitHub Actions runners are user 'runner' (not root) — /root/.kaggle is forbidden
-    # Use $HOME/.kaggle if HOME is set, else fall back to ~/.kaggle via os.path.expanduser
-    # If even that fails, use a temp dir (kaggle CLI also reads KAGGLE_CONFIG_DIR env var)
+    """
+    Returns a writable directory for kaggle.json (works on GitHub Actions, Kaggle, local).
+    kaggle CLI 1.6.17 reads kaggle.json from $HOME/.kaggle/ — but in GitHub Actions,
+    HOME is set to a temp dir per step, so we must write kaggle.json to the
+    ACTUAL home dir AND verify it's readable by the CLI.
+
+    Strategy:
+    1. Get $HOME (GitHub Actions sets this to /home/runner)
+    2. Create $HOME/.kaggle/ if needed
+    3. Write kaggle.json there
+    4. If that fails, fall back to a temp dir + set KAGGLE_CONFIG_DIR env var
+    """
+    import tempfile
+
+    # GitHub Actions: HOME=/home/runner — writable
+    # Local dev: HOME=/home/user — writable
+    # Kaggle: HOME=/root — writable
     home = os.environ.get('HOME') or os.path.expanduser('~')
     kaggle_dir = os.path.join(home, '.kaggle')
+
     try:
         os.makedirs(kaggle_dir, exist_ok=True)
-        # Test write access
+        # Test write access by creating a test file
         test_file = os.path.join(kaggle_dir, '.write_test')
         with open(test_file, 'w') as f: f.write('ok')
         os.remove(test_file)
         return kaggle_dir
-    except (PermissionError, OSError):
-        # Fall back to a temp dir
-        import tempfile
+    except (PermissionError, OSError) as e:
+        print(f"⚠️ لا يمكن الكتابة في {kaggle_dir}: {e} — استخدام temp dir")
         kaggle_dir = os.path.join(tempfile.gettempdir(), 'kaggle_config')
         os.makedirs(kaggle_dir, exist_ok=True)
+        # Set KAGGLE_CONFIG_DIR — kaggle CLI 1.6.17 respects this env var
         os.environ['KAGGLE_CONFIG_DIR'] = kaggle_dir
         return kaggle_dir
 
 
 def setup_kaggle_credentials(account):
     """
-    Configures Kaggle credentials for a specific account using THREE methods
-    simultaneously to maximize compatibility:
-      1. Sets KAGGLE_USERNAME and KAGGLE_KEY env vars (works in all CLIs)
-      2. Writes ~/.kaggle/kaggle.json (the official way)
+    Configures Kaggle credentials for a specific account using ALL methods:
+      1. Writes $HOME/.kaggle/kaggle.json (REQUIRED by kaggle CLI 1.6.17)
+      2. Sets KAGGLE_USERNAME and KAGGLE_KEY env vars (some commands use them)
       3. Sets KAGGLE_CONFIG_DIR env var if HOME is not writable
-    Does NOT install kaggle CLI (that's ensure_kaggle_cli's job, called separately).
+      4. Verifies the file is actually readable before returning True
     """
     try:
         username = account["username"]
         key = account["key"]
 
-        # Method 1: env vars (most reliable — kaggle CLI checks these first)
+        # Method 1: env vars (some commands/checks use these)
         os.environ['KAGGLE_USERNAME'] = username
         os.environ['KAGGLE_KEY'] = key
 
-        # Method 2: write kaggle.json to a writable location
+        # Method 2: write kaggle.json to the directory kaggle CLI will read from
         kaggle_dir = get_kaggle_config_dir()
         kaggle_json_path = os.path.join(kaggle_dir, 'kaggle.json')
         with open(kaggle_json_path, 'w') as f:
             json.dump({"username": username, "key": key}, f)
         os.chmod(kaggle_json_path, 0o600)
 
+        # Verify the file was actually written and is readable
+        if not os.path.exists(kaggle_json_path):
+            print(f"❌ فشل كتابة kaggle.json في {kaggle_json_path}")
+            return False
+
+        # Read back to verify contents
+        try:
+            with open(kaggle_json_path, 'r') as f:
+                data = json.load(f)
+            if data.get('username') != username or data.get('key') != key:
+                print(f"❌ kaggle.json يحتوي على بيانات خاطئة")
+                return False
+        except Exception as e:
+            print(f"❌ فشل قراءة kaggle.json للتحقق: {e}")
+            return False
+
         return True
     except Exception as e:
         print(f"⚠️ فشل إعداد بيانات اعتماد Kaggle لـ {account['username']}: {e}")
-        # Last resort: at least set env vars
-        try:
-            os.environ['KAGGLE_USERNAME'] = account["username"]
-            os.environ['KAGGLE_KEY'] = account["key"]
+        return False
+
+
+def verify_kaggle_auth(account):
+    """
+    Verifies that kaggle CLI can actually authenticate with the given credentials.
+    Calls `kaggle config view` which requires valid auth — if it returns 401,
+    we know the credentials are wrong BEFORE we try to push.
+
+    Returns True if auth is working, False otherwise.
+    """
+    username = account["username"]
+    subprocess_env = os.environ.copy()
+    subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
+    subprocess_env['KAGGLE_USERNAME'] = username
+    subprocess_env['KAGGLE_KEY'] = account["key"]
+    if 'KAGGLE_CONFIG_DIR' in os.environ:
+        subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
+
+    try:
+        # Use `kaggle competitions list` — requires auth, returns list or 401
+        result = subprocess.run(
+            ["kaggle", "competitions", "list"],
+            capture_output=True, text=True, timeout=20,
+            env=subprocess_env
+        )
+        out = (result.stdout + " " + result.stderr).lower()
+        if "401" in out or "unauthorized" in out or "authentication" in out:
+            print(f"   ❌ فشل المصادقة لـ {username} — تحقق من KAGGLE_KEY في GitHub Secrets")
+            return False
+        if result.returncode == 0:
             return True
-        except: return False
+        return False
+    except Exception as e:
+        print(f"   ⚠️ تعذّر التحقق من auth لـ {username}: {e}")
+        return False
 
 
 def check_kaggle_kernel_status(account):
@@ -161,23 +220,34 @@ def check_kaggle_kernel_status(account):
 
     auth_failed_count = 0
 
+    # Build the env dict to pass to subprocess — explicitly include HOME and KAGGLE_*
+    # so the kaggle CLI inherits them correctly
+    subprocess_env = os.environ.copy()
+    subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
+    subprocess_env['KAGGLE_USERNAME'] = username
+    subprocess_env['KAGGLE_KEY'] = account["key"]
+    # KAGGLE_CONFIG_DIR — if set, kaggle CLI reads kaggle.json from there
+    if 'KAGGLE_CONFIG_DIR' in os.environ:
+        subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
+
     for slug in possible_slugs:
         try:
             result = subprocess.run(
                 ["kaggle", "kernels", "status", slug],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=30,
+                env=subprocess_env
             )
             out = (result.stdout + " " + result.stderr).lower()
 
-            # ⚠️ Detect auth failures FIRST — kaggle CLI 2.x prints these messages
-            # and we must NOT confuse them with "kernel not found"
+            # ⚠️ Detect auth failures FIRST
             if ("authentication required" in out or
                 "you will need a kaggle account" in out or
                 "kaggle auth login" in out or
-                "401 unauthorized" in out):
-                print(f"   ⚠️ فشل المصادقة لـ {username} — kaggle CLI يطلب OAuth أو kaggle.json صحيح")
+                "401" in out or
+                "unauthorized" in out):
+                print(f"   ⚠️ فشل المصادقة لـ {username} — تحقق من KAGGLE_KEY")
                 auth_failed_count += 1
-                continue  # try next slug, but track that auth failed
+                continue
 
             # If kernel not found, try the next slug
             if "no kernels found" in out or "not found" in out or "404" in out:
@@ -195,15 +265,11 @@ def check_kaggle_kernel_status(account):
 
             # CLI returned something but ambiguous — check return code
             if result.returncode == 0:
-                # If stdout is empty, treat as unknown (don't assume error)
                 if not result.stdout.strip():
                     return "unknown"
-                # Otherwise log the raw output for debugging
                 print(f"   📝 raw output for {slug}: {result.stdout[:200]}")
                 return "unknown"
             else:
-                # Non-zero exit + non-404 error → network issue, not "kernel not found"
-                # Try next slug
                 continue
         except subprocess.TimeoutExpired:
             print(f"⏱️ انتهت مهلة الاستعلام عن {slug}")
@@ -213,8 +279,6 @@ def check_kaggle_kernel_status(account):
             return "unknown"
 
     # If auth failed for any slug, return "unknown" (NOT "not_found")
-    # — this prevents the Maestro from incorrectly marking the account as fresh
-    #   and trying to launch a duplicate session on it
     if auth_failed_count > 0:
         print(f"   ⚠️ فشل المصادقة على {auth_failed_count} محاولة لـ {username} — إرجاع unknown")
         return "unknown"
@@ -592,10 +656,18 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             json.dump(metadata, f, indent=2)
 
         # Push using the official CLI
-        # Env vars KAGGLE_USERNAME + KAGGLE_KEY are set by setup_kaggle_credentials
+        # Pass explicit env vars so kaggle CLI inherits credentials correctly
+        subprocess_env = os.environ.copy()
+        subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
+        subprocess_env['KAGGLE_USERNAME'] = username
+        subprocess_env['KAGGLE_KEY'] = account["key"]
+        if 'KAGGLE_CONFIG_DIR' in os.environ:
+            subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
+
         result = subprocess.run(
             ["kaggle", "kernels", "push", "-p", "."],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=120,
+            env=subprocess_env
         )
 
         if result.returncode == 0:
