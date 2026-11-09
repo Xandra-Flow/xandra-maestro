@@ -152,14 +152,14 @@ def check_kaggle_kernel_status(account):
         return "unknown"
 
     username = account["username"]
-    # The canonical slug verified from real Kaggle URLs:
-    # kaggle.com/code/{username}/xandra-worker
-    # We try the canonical one first, then alternates as fallback
+    # The canonical slug verified from real Kaggle URLs
     possible_slugs = [
         f"{username}/xandra-worker",      # ✅ CANONICAL — verified from actual URLs
         f"{username}/xandraworker",       # alternate (no separator)
         f"{username}/xandra_worker"       # alternate (underscore)
     ]
+
+    auth_failed_count = 0
 
     for slug in possible_slugs:
         try:
@@ -168,6 +168,16 @@ def check_kaggle_kernel_status(account):
                 capture_output=True, text=True, timeout=30
             )
             out = (result.stdout + " " + result.stderr).lower()
+
+            # ⚠️ Detect auth failures FIRST — kaggle CLI 2.x prints these messages
+            # and we must NOT confuse them with "kernel not found"
+            if ("authentication required" in out or
+                "you will need a kaggle account" in out or
+                "kaggle auth login" in out or
+                "401 unauthorized" in out):
+                print(f"   ⚠️ فشل المصادقة لـ {username} — kaggle CLI يطلب OAuth أو kaggle.json صحيح")
+                auth_failed_count += 1
+                continue  # try next slug, but track that auth failed
 
             # If kernel not found, try the next slug
             if "no kernels found" in out or "not found" in out or "404" in out:
@@ -192,11 +202,8 @@ def check_kaggle_kernel_status(account):
                 print(f"   📝 raw output for {slug}: {result.stdout[:200]}")
                 return "unknown"
             else:
-                # Non-zero exit + non-404 error → auth/network issue
-                if "unauthorized" in out or "401" in out:
-                    print(f"   ⚠️ 401 Unauthorized for {username}")
-                    return "unknown"
-                # For other errors, try next slug
+                # Non-zero exit + non-404 error → network issue, not "kernel not found"
+                # Try next slug
                 continue
         except subprocess.TimeoutExpired:
             print(f"⏱️ انتهت مهلة الاستعلام عن {slug}")
@@ -205,7 +212,14 @@ def check_kaggle_kernel_status(account):
             print(f"⚠️ خطأ في فحص حالة الـ kernel لـ {username}: {e}")
             return "unknown"
 
-    # All slugs returned "not found" — this is a fresh account (no kernel yet)
+    # If auth failed for any slug, return "unknown" (NOT "not_found")
+    # — this prevents the Maestro from incorrectly marking the account as fresh
+    #   and trying to launch a duplicate session on it
+    if auth_failed_count > 0:
+        print(f"   ⚠️ فشل المصادقة على {auth_failed_count} محاولة لـ {username} — إرجاع unknown")
+        return "unknown"
+
+    # All slugs returned "not found" — this is genuinely a fresh account (no kernel)
     return "not_found"
 
 
@@ -380,6 +394,8 @@ def select_available_account(state):
 
         weekly_hours = 0
         total_sessions = 0
+        last_session_time = None  # أحدث جلسة لهذا الحساب (لتوزيع الأحمال)
+
         for session in state.get("history", []):
             if username in session.get("worker_id", ""):
                 total_sessions += 1
@@ -389,6 +405,9 @@ def select_available_account(state):
                     session_time = datetime.fromisoformat(ts)
                     if session_time > week_start:
                         weekly_hours += session.get("gpu_hours", 0)
+                    # تتبّع آخر مرة استُخدم فيها هذا الحساب
+                    if last_session_time is None or session_time > last_session_time:
+                        last_session_time = session_time
                 except: pass
 
         remaining = WEEKLY_GPU_LIMIT_PER_ACCOUNT - weekly_hours
@@ -404,13 +423,22 @@ def select_available_account(state):
             "remaining": remaining,
             "weekly_hours": weekly_hours,
             "sessions": total_sessions,
+            "last_session_time": last_session_time.isoformat() if last_session_time else None,
             "kernel_status": kernel_status,
             "excluded_reason": excluded_reason
         })
 
-    # Pick the best: not excluded, has the most remaining hours
+    # Pick the best account using a SMART multi-factor scoring:
+    #   1. Most remaining hours (primary)
+    #   2. Least-recently-used (tiebreaker — distributes load)
+    #   3. Fewest total sessions (final tiebreaker)
     candidates = [a for a in account_stats if a["excluded_reason"] is None]
-    candidates.sort(key=lambda x: x["remaining"], reverse=True)
+    # Sort by: most remaining DESC, then oldest last_session ASC, then fewest sessions ASC
+    candidates.sort(key=lambda x: (
+        -x["remaining"],                          # 1) most remaining first
+        x["last_session_time"] or "0000",         # 2) least-recently-used first
+        x["sessions"]                             # 3) fewest sessions first
+    ))
 
     if candidates:
         best = candidates[0]
@@ -461,8 +489,12 @@ def compute_session_gaps(state):
 def ensure_kaggle_cli():
     """
     Ensures the kaggle CLI is installed AND working.
-    Fixes the known issue where `pip install kaggle` doesn't install `six`
-    on Python 3.11+. We install `six` explicitly first, then kaggle.
+    Uses kaggle==1.6.17 specifically — the 1.x series reliably supports
+    KAGGLE_USERNAME + KAGGLE_KEY env vars (and ~/.kaggle/kaggle.json).
+    kaggle 2.x switched to OAuth-first which breaks our env-var-based auth.
+
+    Also fixes the known issue where `pip install kaggle` doesn't install `six`
+    on Python 3.11+. We install `six` explicitly first, then kaggle==1.6.17.
     """
     try:
         # Test if kaggle CLI actually works (not just exists)
@@ -471,18 +503,25 @@ def ensure_kaggle_cli():
             capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
-            return True
+            # Check version — if it's 2.x, downgrade to 1.6.17
+            version_out = (result.stdout + result.stderr).lower()
+            if version_out.startswith("kaggle cli 2") or "kaggle 2." in version_out:
+                print(f"⚠️ kaggle CLI 2.x مثبّت ({version_out.strip()}) — سيتم تخفيضه إلى 1.6.17")
+            else:
+                return True
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         pass
     except Exception:
         pass
 
-    # Install six first (the missing dependency), then kaggle
-    print("📦 تثبيت kaggle CLI + six...")
+    # Install six first, then pin kaggle to 1.6.17 (the legacy reliable version)
+    print("📦 تثبيت kaggle CLI 1.6.17 (الإصدار المتوافق مع env vars)...")
     try:
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "six"],
                        check=True, capture_output=True, timeout=60)
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "kaggle"],
+        # Force-pin to 1.6.17 — this overrides any 2.x version
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall",
+                        "kaggle==1.6.17"],
                        check=True, capture_output=True, timeout=120)
         # Verify
         result = subprocess.run(
@@ -490,7 +529,7 @@ def ensure_kaggle_cli():
             capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
-            print("✅ kaggle CLI مثبّت بنجاح")
+            print(f"✅ kaggle CLI 1.6.17 مثبّت بنجاح: {result.stdout.strip()}")
             return True
         else:
             print(f"❌ kaggle CLI فشل بعد التثبيت: {result.stderr}")
