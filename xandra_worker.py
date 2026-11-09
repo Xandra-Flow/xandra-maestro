@@ -1,7 +1,7 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║   Xandra Hope - Kaggle Worker (Shamela + Wikipedia + Web)     ║
+║   Xandra Hope - Kaggle Worker (Ultimate Arabic Edition v2)    ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &              ║
 ║                  Александра Евгеньевна Острикова              ║
 ║   All Rights Reserved.                                        ║
@@ -11,10 +11,16 @@
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 
-مصادر البيانات:
-1. المكتبة الشاملة (Shamela) - 8000+ كتاب عربي
-2. ويكيبيديا العربية - مقالات علمية وتاريخية
-3. FineWeb Arabic - صفحات ويب عربية نظيفة
+مصادر البيانات (Kaggle + Hugging Face):
+1. المكتبة الشاملة (Shamela) - 8000+ كتاب
+2. ويكيبيديا العربية
+3. Arabic BERT Corpus
+4. Arabic Library
+5. Tashkeela (نصوص مشكولة)
+6. Best Arabic Poem (شعر عربي)
+7. Language Identification (تمييز اللغة)
+8. Two Million Rows Egyptian (عامية مصرية)
+9. Arabic Healthcare (رعاية صحية)
 """
 
 # ===================================================
@@ -31,6 +37,7 @@ install('transformers')
 install('huggingface_hub')
 install('accelerate')
 install('datasets')
+install('pandas') # مطلوب لقراءة ملفات CSV
 
 import os
 import json
@@ -40,9 +47,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datetime import datetime, timedelta
 from huggingface_hub import HfApi, hf_hub_download, upload_file
+import glob
+import pandas as pd
 
 print("=" * 60)
-print("🎯 Xandra Hope - Kaggle Worker (Shamela + Wikipedia + Web)")
+print("🎯 Xandra Hope - Kaggle Worker (Ultimate Arabic Edition v2)")
 print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
 print("=" * 60)
@@ -204,91 +213,108 @@ from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
 # ===================================================
-# 9. نظام التدفق المتعدد المصادر (Multi-Source Streaming)
+# 9. نظام التدفق متعدد المصادر (Multi-Source Streaming)
 # ===================================================
-print("\n🌐 تهيئة نظام التدفق متعدد المصادر...")
+print("\n🌐 تهيئة نظام التدفق متعدد المصادر (9 مصادر)...")
 from datasets import load_dataset, interleave_datasets
 
+all_texts = []
+
+# --- قراءة ملفات Kaggle المحلية مباشرة ---
+print("⏳ قراءة ملفات Kaggle Datasets المحلية...")
+kaggle_data_paths = [
+    "/kaggle/input/arabic-bert-corpus",
+    "/kaggle/input/arabic-library",
+    "/kaggle/input/tashkeela",
+    "/kaggle/input/best-arabic-poem-comprehensive-dataset",
+    "/kaggle/input/language-identification-datasst",
+    "/kaggle/input/two-million-rows-egyptian-datasets",
+    "/kaggle/input/arabic-healthcare"
+]
+
+for path in kaggle_data_paths:
+    if os.path.exists(path):
+        print(f"📂 تم العثور على: {path}")
+        for filename in os.listdir(path):
+            filepath = os.path.join(path, filename)
+            try:
+                # قراءة ملفات TXT
+                if filename.endswith('.txt'):
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        paragraphs = content.split('\n')
+                        for p in paragraphs:
+                            if len(p) > 50:
+                                all_texts.append(p)
+                
+                # قراءة ملفات CSV (باستخدام pandas)
+                elif filename.endswith('.csv'):
+                    df = pd.read_csv(filepath, encoding='utf-8', on_bad_lines='skip')
+                    # نأخذ العمود الذي يحتوي على نصوص عربية
+                    for col in df.columns:
+                        if df[col].dtype == 'object':
+                            for val in df[col].dropna():
+                                if len(str(val)) > 50:
+                                    all_texts.append(str(val))
+            except Exception as e:
+                print(f"⚠️ خطأ في قراءة {filename}: {e}")
+
+print(f"✅ تم تحميل {len(all_texts)} نص من Kaggle Datasets")
+
+# --- تحميل المصادر البعيدة (Hugging Face) ---
 stream_datasets = []
 
-# --- المصدر 1: المكتبة الشاملة (Shamela) ---
 try:
     print("⏳ تحميل المكتبة الشاملة (Shamela)...")
-    shamela = load_dataset(
-        "ReligiousLLMs/shamela_all_diacritized_fully",
-        split="train",
-        streaming=True
-    )
+    shamela = load_dataset("ReligiousLLMs/shamela_all_diacritized_fully", split="train", streaming=True)
     stream_datasets.append(shamela)
     print("✅ الشاملة جاهزة!")
 except Exception as e:
     print(f"⚠️ فشل تحميل الشاملة: {e}")
 
-# --- المصدر 2: ويكيبيديا العربية ---
 try:
     print("⏳ تحميل ويكيبيديا العربية...")
-    wiki = load_dataset(
-        "wikimedia/wikipedia",
-        "20231101.ar",
-        split="train",
-        streaming=True
-    )
+    wiki = load_dataset("wikimedia/wikipedia", "20231101.ar", split="train", streaming=True)
     stream_datasets.append(wiki)
     print("✅ ويكيبيديا جاهزة!")
 except Exception as e:
     print(f"⚠️ فشل تحميل ويكيبيديا: {e}")
 
-# --- المصدر 3: FineWeb العربي ---
-try:
-    print("⏳ تحميل FineWeb العربي...")
-    fineweb = load_dataset(
-        "HuggingFaceFW/fineweb",
-        "arb_Arab",
-        split="train",
-        streaming=True
-    )
-    stream_datasets.append(fineweb)
-    print("✅ FineWeb جاهز!")
-except Exception as e:
-    print(f"⚠️ فشل تحميل FineWeb: {e}")
-
-# دمج المصادر (interleave)
 if len(stream_datasets) > 0:
-    # نعطي الشاملة وزناً أكبر (probabilities)
-    probs = [0.5] + [0.25] * (len(stream_datasets) - 1) if len(stream_datasets) > 1 else [1.0]
-    combined_stream = interleave_datasets(stream_datasets, probabilities=probs, seed=42)
+    combined_stream = interleave_datasets(stream_datasets, probabilities=[0.5, 0.5], seed=42)
     stream_iter = iter(combined_stream)
     STREAMING_READY = True
-    print(f"✅ تم دمج {len(stream_datasets)} مصدر بيانات!")
-    print("📊 التوزيع: الشاملة 50% + ويكيبيديا 25% + FineWeb 25%")
+    print(f"✅ تم دمج {len(stream_datasets)} مصدر بيانات HF!")
 else:
-    print("❌ فشل تحميل جميع المصادر! استخدام بيانات احتياطية.")
-    texts = [
+    STREAMING_READY = False
+
+if len(all_texts) == 0 and not STREAMING_READY:
+    print("❌ لا توجد بيانات متاحة! استخدام بيانات احتياطية.")
+    all_texts = [
         'العمارة الإسلامية فن راقٍ يمتد عبر القرون',
         'البرمجة العكسية تحليل البرمجيات لفهم آلية عملها',
     ] * 100
-    STREAMING_READY = False
 
-# دالة لجلب Batch جديد من التدفق
-def get_streaming_batch(batch_size=32, max_len=128):
+# دالة لجلب Batch جديد
+def get_batch(batch_size=32, max_len=128):
     texts = []
-    for item in stream_iter:
-        if len(texts) >= batch_size:
-            break
-        # استخراج النص من أي مفتاح متاح
-        text = item.get('text', item.get('content', item.get('nass', '')))
-        if text and len(str(text)) > 50:
-            texts.append(str(text))
     
-    # لو لم نحصل على عدد كافٍ، نعيد التكرار
-    if len(texts) < batch_size:
-        stream_iter = iter(combined_stream)
+    # 70% من Kaggle المحلية، 30% من HF Streaming
+    use_stream = STREAMING_READY and (len(all_texts) == 0 or torch.rand(1).item() < 0.3)
+    
+    if use_stream:
         for item in stream_iter:
             if len(texts) >= batch_size:
                 break
             text = item.get('text', item.get('content', item.get('nass', '')))
             if text and len(str(text)) > 50:
                 texts.append(str(text))
+    
+    # إكمال المتبقي من البيانات المحلية
+    if len(texts) < batch_size and len(all_texts) > 0:
+        indices = torch.randint(0, len(all_texts), (batch_size - len(texts),))
+        for idx in indices:
+            texts.append(all_texts[idx])
     
     batch = []
     for text in texts:
@@ -324,19 +350,11 @@ for i in range(MAX_STEPS):
         print(f"⏰ انتهى الوقت ({elapsed:.1f} دقيقة)")
         break
     
-    if STREAMING_READY:
-        try:
-            batch = get_streaming_batch(BATCH_SIZE).to(device)
-        except:
-            stream_iter = iter(combined_stream)
-            batch = get_streaming_batch(BATCH_SIZE).to(device)
-    else:
-        indices = torch.randint(0, len(texts), (BATCH_SIZE,))
-        batch = torch.stack([
-            tokenizer(texts[idx], return_tensors='pt', padding='max_length',
-                     truncation=True, max_length=128)['input_ids'][0]
-            for idx in indices
-        ]).to(device)
+    try:
+        batch = get_batch(BATCH_SIZE).to(device)
+    except Exception as e:
+        print(f"⚠️ خطأ في جلب البيانات، إعادة المحاولة... ({e})")
+        continue
     
     logits, loss = model(batch, targets=batch)
     optimizer.zero_grad()
