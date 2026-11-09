@@ -1,13 +1,9 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
-║   Xandra Hope - Kaggle Worker (Ultimate Arabic Edition v2)    ║
+║   Xandra Hope - Kaggle Worker (Ultimate Arabic v3 + Config)   ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
 ║                  Александра Евгеньевна Острикова              ║
 ║   All Rights Reserved.                                         ║
-║                                                               ║
-║   License: XHNSL v1.0                                         ║
-║   Contact: ahmed.kamel@xandraflow.com                         ║
-║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 """
 
@@ -38,11 +34,11 @@ from huggingface_hub import HfApi, hf_hub_download, upload_file
 import glob
 import pandas as pd
 
-# تسجيل وقت بدء الجلسة الفعلي (لحساب ساعات GPU بدقة كما يفعل كاجل)
+# تسجيل وقت بدء الجلسة الفعلي
 SESSION_START_TIME = time.time()
 
 print("=" * 60)
-print("🎯 Xandra Hope - Kaggle Worker (Ultimate Arabic Edition v2)")
+print("🎯 Xandra Hope - Kaggle Worker (Ultimate Arabic v3)")
 print(f"👤 Running on Account: {__KAGGLE_USERNAME__}")
 print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
@@ -75,8 +71,7 @@ def acquire_lock():
             expires_at = lock.get('expires_at')
             if expires_at:
                 expires_time = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                if datetime.now(expires_time.tzinfo) > expires_time:
-                    pass
+                if datetime.now(expires_time.tzinfo) > expires_time: pass
                 else: return False
         state['training_lock'] = {
             'is_locked': True, 'locked_by': WORKER_ID,
@@ -144,47 +139,67 @@ last_step = load_checkpoint(model)
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
+# ===================================================
+# نظام تحميل مصادر التدريب من ملف JSON خارجي
+# ===================================================
+print("\n📖 قراءة ملف مصادر التدريب (training_sources.json)...")
+# تحميل ملف الإعدادات (سيتم رفعه على GitHub Repo بجوار الكود)
+try:
+    with open('training_sources.json', 'r') as f:
+        sources_config = json.load(f)
+    print(f"✅ تم تحميل {len(sources_config['sources'])} مصدر تدريب.")
+except:
+    print("⚠️ لم يتم العثور على training_sources.json، استخدام الإعدادات الافتراضية.")
+    sources_config = {
+        "sources": [
+            {"name": "Shamela", "type": "stream", "path": "ReligiousLLMs/shamela_all_diacritized_fully", "split": "train", "field": "text", "weight": 0.4},
+            {"name": "Wikipedia", "type": "stream", "path": "wikimedia/wikipedia", "config": "20231101.ar", "split": "train", "field": "text", "weight": 0.3},
+            {"name": "Tashkeela", "type": "local", "path": "/kaggle/input/tashkeela", "weight": 0.3}
+        ]
+    }
+
+from datasets import load_dataset, interleave_datasets
+
 all_texts = []
-kaggle_data_paths = [
-    "/kaggle/input/arabic-bert-corpus", "/kaggle/input/arabic-library", "/kaggle/input/tashkeela",
-    "/kaggle/input/best-arabic-poem-comprehensive-dataset", "/kaggle/input/language-identification-datasst",
-    "/kaggle/input/two-million-rows-egyptian-datasets", "/kaggle/input/arabic-healthcare"
-]
-
-for path in kaggle_data_paths:
-    if os.path.exists(path):
-        for filename in os.listdir(path):
-            filepath = os.path.join(path, filename)
-            try:
-                if filename.endswith('.txt'):
-                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                        for p in f.read().split('\n'):
-                            if len(p) > 50: all_texts.append(p)
-                elif filename.endswith('.csv'):
-                    df = pd.read_csv(filepath, encoding='utf-8', on_bad_lines='skip')
-                    for col in df.columns:
-                        if df[col].dtype == 'object':
-                            for val in df[col].dropna():
-                                if len(str(val)) > 50: all_texts.append(str(val))
-            except: pass
-
 stream_datasets = []
-try:
-    shamela = load_dataset("ReligiousLLMs/shamela_all_diacritized_fully", split="train", streaming=True)
-    stream_datasets.append(shamela)
-except: pass
-try:
-    wiki = load_dataset("wikimedia/wikipedia", "20231101.ar", split="train", streaming=True)
-    stream_datasets.append(wiki)
-except: pass
+stream_weights = []
+
+for source in sources_config["sources"]:
+    try:
+        if source["type"] == "local":
+            path = source["path"]
+            if os.path.exists(path):
+                print(f"📂 قراءة بيانات محلية: {source['name']}")
+                for filename in os.listdir(path):
+                    filepath = os.path.join(path, filename)
+                    if filename.endswith('.txt'):
+                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                            for p in f.read().split('\n'):
+                                if len(p) > 50: all_texts.append(p)
+                    elif filename.endswith('.csv'):
+                        df = pd.read_csv(filepath, encoding='utf-8', on_bad_lines='skip')
+                        for col in df.columns:
+                            if df[col].dtype == 'object':
+                                for val in df[col].dropna():
+                                    if len(str(val)) > 50: all_texts.append(str(val))
+        
+        elif source["type"] == "stream":
+            print(f"🌐 تحميل بيانات Streaming: {source['name']}")
+            if "config" in source:
+                ds = load_dataset(source["path"], source["config"], split=source["split"], streaming=True)
+            else:
+                ds = load_dataset(source["path"], split=source["split"], streaming=True)
+            stream_datasets.append(ds)
+            stream_weights.append(source["weight"])
+    except Exception as e:
+        print(f"⚠️ فشل تحميل {source['name']}: {e}")
 
 if len(stream_datasets) > 0:
-    combined_stream = interleave_datasets(stream_datasets, probabilities=[0.5, 0.5], seed=42)
+    combined_stream = interleave_datasets(stream_datasets, probabilities=stream_weights, seed=42)
     stream_iter = iter(combined_stream)
     STREAMING_READY = True
 else:
     STREAMING_READY = False
-    all_texts = ['العمارة الإسلامية فن راقٍ يمتد عبر القرون'] * 100
 
 def get_batch(batch_size=32, max_len=128):
     texts = []
@@ -196,7 +211,7 @@ def get_batch(batch_size=32, max_len=128):
             if text and len(str(text)) > 50: texts.append(str(text))
     if len(texts) < batch_size and len(all_texts) > 0:
         indices = torch.randint(0, len(all_texts), (batch_size - len(texts),))
-        for idx in indices: texts.append(all_texts[idx])
+        for idx in texts: texts.append(all_texts[idx])
     
     batch = []
     for text in texts:
@@ -261,7 +276,7 @@ if losses:
         'timestamp': datetime.now().isoformat(),
         'final_step': step, 'final_loss': final_loss,
         'steps_done': len(losses), 'gpu_hours': gpu_hours,
-        'worker_id': WORKER_ID  # سيسجل اسم الحساب الحقيقي
+        'worker_id': WORKER_ID
     })
     if len(state['history']) > 50: state['history'] = state['history'][-50:]
     
