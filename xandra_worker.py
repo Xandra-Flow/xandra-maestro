@@ -1,9 +1,9 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
 ║   Xandra Hope - Kaggle Worker (Ultimate Arabic v3 + Config)   ║
-║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
+║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &              ║
 ║                  Александра Евгеньевна Острикова              ║
-║   All Rights Reserved.                                         ║
+║   All Rights Reserved.                                        ║
 ╚═══════════════════════════════════════════════════════════════╝
 """
 
