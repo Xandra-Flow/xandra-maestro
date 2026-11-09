@@ -1,10 +1,21 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
-║   Xandra Hope - Maestro (Smart Load Balancer + Calculated Quota)║
+║   Xandra Hope - Maestro (Real-time Discovery + Smart Lock)    ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
 ║                  Александра Евгеньевна Острикова              ║
 ║   All Rights Reserved. License: XHNSL v1.0                   ║
 ╚═══════════════════════════════════════════════════════════════╝
+
+UPGRADE NOTES (v4.1 → v4.2):
+- Added check_kaggle_kernel_status(): real-time query of notebook status
+- Rewrote check_lock(): now verifies BOTH lock expiry AND actual kernel state
+- Rewrote select_available_account(): excludes accounts with running notebooks
+- Added compute_session_gaps(): tracks wasted time between sessions
+- Added update_kernel_status_map(): stores per-account kernel status in state.json
+  so the Cloudflare Dashboard can render real status without Kaggle credentials
+- Reduced LOCK_TIMEOUT_HOURS from 8 → 12 (safety net only, since real status is checked)
+- Added MAX_LOCK_STALE_HOURS: if lock has been held > N hours AND kernel is dead,
+  force-release the lock automatically (auto-recovery from crashed workers)
 """
 
 import os
@@ -14,7 +25,7 @@ import requests
 import subprocess
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from huggingface_hub import hf_hub_download, upload_file
 
 HF_REPO = os.environ.get("HF_REPO")
@@ -32,8 +43,10 @@ for i in range(1, 7):
         KAGGLE_ACCOUNTS.append({"username": username, "key": key, "index": i, "status": "active"})
 
 WEEKLY_GPU_LIMIT_PER_ACCOUNT = 30
-LOCK_TIMEOUT_HOURS = 8
-MIN_HOURS_BETWEEN_SESSIONS = 2
+LOCK_TIMEOUT_HOURS = 12          # safety net only; real status checked each cycle
+MAX_LOCK_STALE_HOURS = 14        # if lock older than this AND kernel is dead → force release
+MIN_HOURS_BETWEEN_SESSIONS = 0   # 0 because we now rely on real-time kernel status
+
 
 def send_email(subject, body):
     if not GMAIL_USER or not GMAIL_PASS: return
@@ -50,6 +63,68 @@ def send_email(subject, body):
         server.quit()
     except: pass
 
+
+# ═══════════════════════════════════════════════════════════════
+# 📡 Real-time Kaggle Kernel Status Discovery
+# ═══════════════════════════════════════════════════════════════
+
+def setup_kaggle_credentials(account):
+    """Configures ~/.kaggle/kaggle.json for a specific account before querying."""
+    try:
+        os.makedirs("/root/.kaggle", exist_ok=True)
+        with open("/root/.kaggle/kaggle.json", "w") as f:
+            json.dump({"username": account["username"], "key": account["key"]}, f)
+        os.chmod("/root/.kaggle/kaggle.json", 0o600)
+        if not os.path.exists("/usr/local/bin/kaggle"):
+            subprocess.run(["pip", "install", "-q", "kaggle"], check=True)
+        return True
+    except Exception as e:
+        print(f"⚠️ فشل إعداد بيانات اعتماد Kaggle لـ {account['username']}: {e}")
+        return False
+
+
+def check_kaggle_kernel_status(account):
+    """
+    Queries Kaggle API for the real status of xandra_worker notebook.
+
+    Returns one of:
+        'running'   → notebook is actively training (DO NOT touch it)
+        'complete'  → notebook finished successfully
+        'error'     → notebook crashed or errored out
+        'canceled'  → notebook was canceled manually
+        'not_found' → no notebook exists yet (fresh account)
+        'unknown'   → could not determine (network/auth error)
+    """
+    if not setup_kaggle_credentials(account):
+        return "unknown"
+
+    username = account["username"]
+    try:
+        result = subprocess.run(
+            ["kaggle", "kernels", "status", f"{username}/xandra_worker"],
+            capture_output=True, text=True, timeout=30
+        )
+        out = (result.stdout + " " + result.stderr).lower()
+
+        if "no kernels found" in out or "not found" in out or "404" in out:
+            return "not_found"
+        if "running" in out or "in queue" in out:
+            return "running"
+        if "complete" in out:
+            return "complete"
+        if "error" in out or "failed" in out:
+            return "error"
+        if "cancel" in out:
+            return "canceled"
+        return "unknown"
+    except subprocess.TimeoutExpired:
+        print(f"⏱️ انتهت مهلة الاستعلام عن {username}")
+        return "unknown"
+    except Exception as e:
+        print(f"⚠️ خطأ في فحص حالة الـ kernel لـ {username}: {e}")
+        return "unknown"
+
+
 def get_state():
     try:
         path = hf_hub_download(repo_id=HF_REPO, filename="state.json", repo_type="model", token=HF_TOKEN)
@@ -59,197 +134,356 @@ def get_state():
             "current_step": 0, "target_steps": 500000, "current_loss": None,
             "history": [], "best_loss": float('inf'), "updated_at": None,
             "gpu_hours_used": 0, "training_lock": {"is_locked": False},
-            "current_account_index": 0, "account_usage": {}, "disabled_accounts": []
+            "current_account_index": 0, "account_usage": {}, "disabled_accounts": [],
+            "kernel_status_map": {}, "session_gaps": []
         }
 
+
 def update_state(state):
-    state["updated_at"] = datetime.now().isoformat()
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
     with open("state.json", "w") as f: json.dump(state, f, indent=2, ensure_ascii=False)
     upload_file(path_or_fileobj="state.json", path_in_repo="state.json", repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
 
+
+# ═══════════════════════════════════════════════════════════════
+# 🔒 Smart Lock Check (combines time + real kernel state)
+# ═══════════════════════════════════════════════════════════════
+
+def extract_account_name(locked_by):
+    """Strips 'maestro-' or 'kaggle-' prefix from locked_by field."""
+    if not locked_by: return None
+    if locked_by.startswith("maestro-"): return locked_by[len("maestro-"):]
+    if locked_by.startswith("kaggle-"): return locked_by[len("kaggle-"):]
+    return locked_by
+
+
 def check_lock(state):
+    """
+    SMART LOCK CHECK — combines time expiry with real kernel status.
+
+    Returns: (is_still_busy: bool, reason: str)
+      - (True,  "running")         → kernel is actively running, leave it alone
+      - (False, "kernel_complete") → kernel finished, lock should be released
+      - (False, "kernel_error")    → kernel crashed, lock should be released
+      - (False, "expired")         → time-based expiry reached
+      - (False, "stale_force_release") → lock held too long AND kernel is dead
+      - (False, None)              → no lock at all
+    """
     lock = state.get("training_lock", {})
-    if not lock.get("is_locked"): return False, None
+    if not lock.get("is_locked"):
+        return False, None
+
+    locked_by = lock.get("locked_by")
+    account_name = extract_account_name(locked_by)
+
+    # Step 1: check time expiry first (fast path)
     expires_at = lock.get("expires_at")
+    now = datetime.now(timezone.utc)
+    time_expired = False
     if expires_at:
-        expires_time = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-        if datetime.now(expires_time.tzinfo) > expires_time: return False, "منتهي الصلاحية"
-    return True, lock.get("locked_by")
+        try:
+            exp_time = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if now > exp_time:
+                time_expired = True
+        except: pass
+
+    # Step 2: query real kernel status (the smart part)
+    if account_name:
+        account_obj = next((a for a in KAGGLE_ACCOUNTS if a["username"] == account_name), None)
+        if account_obj:
+            kernel_state = check_kaggle_kernel_status(account_obj)
+            print(f"📡 حالة الـ kernel لـ {account_name}: {kernel_state}")
+
+            if kernel_state == "running":
+                # Real-time confirmation that the session is still alive
+                # Even if time expired, we trust the real status more
+                return True, "running"
+            elif kernel_state in ("complete", "error", "canceled"):
+                # Kernel finished/crashed — release the lock immediately!
+                return False, f"kernel_{kernel_state}"
+            # else: not_found / unknown → fall through to time-based check
+
+    # Step 3: stale lock recovery — if lock is REALLY old and kernel is dead/unknown
+    locked_at = lock.get("locked_at")
+    if locked_at:
+        try:
+            la_time = datetime.fromisoformat(locked_at.replace("Z", "+00:00"))
+            age_hours = (now - la_time).total_seconds() / 3600
+            if age_hours > MAX_LOCK_STALE_HOURS:
+                print(f"⚠️ قفل معلّق منذ {age_hours:.1f} ساعة — تحرير قسري")
+                return False, "stale_force_release"
+        except: pass
+
+    # Step 4: fall back to pure time-based decision
+    if time_expired:
+        return False, "expired"
+
+    # Lock is fresh and we couldn't get real status → assume still running
+    return True, "running_assumed"
+
+
+def release_lock(state, reason="manual"):
+    """Releases the training lock with a reason for audit trail."""
+    state["training_lock"] = {
+        "is_locked": False, "locked_by": None,
+        "locked_at": None, "expires_at": None,
+        "released_at": datetime.now(timezone.utc).isoformat(),
+        "release_reason": reason
+    }
+    return state
+
 
 def acquire_lock(state, account_name):
     state["training_lock"] = {
         "is_locked": True,
         "locked_by": f"maestro-{account_name}",
-        "locked_at": datetime.now().isoformat(),
-        "expires_at": (datetime.now() + timedelta(hours=LOCK_TIMEOUT_HOURS)).isoformat()
+        "locked_at": datetime.now(timezone.utc).isoformat(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=LOCK_TIMEOUT_HOURS)).isoformat(),
+        "released_at": None, "release_reason": None
     }
     return state
 
-def sync_account_quotas(state):
-    """حساب أرقام الاستهلاك الفعلية لكل حساب من سجل الجلسات (history)"""
-    print("🔄 حساب أرقام الاستهلاك الفعلية من السجل...")
-    account_usage = state.get("account_usage", {})
-    
-    now = datetime.now()
-    week_start = now - timedelta(days=now.weekday())
-    week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # تهيئة الحسابات الحالية في الـ Secrets
+
+# ═══════════════════════════════════════════════════════════════
+# 🎯 Smart Account Selection (excludes accounts with running kernels)
+# ═══════════════════════════════════════════════════════════════
+
+def update_kernel_status_map(state):
+    """
+    Queries all Kaggle accounts for their kernel status and stores the result
+    in state.kernel_status_map. This is what the Cloudflare Dashboard reads.
+    """
+    kernel_map = {}
     for acc in KAGGLE_ACCOUNTS:
-        if acc["username"] not in account_usage:
-            account_usage[acc["username"]] = {"used": 0, "remaining": 30}
-    
-    # حساب الساعات الأسبوعية لكل حساب من الـ history
-    weekly_hours = {acc["username"]: 0 for acc in KAGGLE_ACCOUNTS}
-    
-    for session in state.get("history", []):
-        worker_id = session.get("worker_id", "")
-        gpu_hours = session.get("gpu_hours", 0)
-        timestamp_str = session.get("timestamp", "")
-        
-        account_name = None
-        if worker_id.startswith("kaggle-"):
-            account_name = worker_id[7:]
-        elif worker_id.startswith("maestro-"):
-            account_name = worker_id[8:]
-            
-        if account_name and account_name in weekly_hours:
-            try:
-                session_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-                if session_time > week_start:
-                    weekly_hours[account_name] += gpu_hours
-            except: pass
-            
-    for username, hours_used in weekly_hours.items():
-        remaining = max(0, 30 - hours_used)
-        account_usage[username] = {
-            "used": round(hours_used, 2),
-            "remaining": round(remaining, 2)
+        username = acc["username"]
+        status = check_kaggle_kernel_status(acc)
+        kernel_map[username] = {
+            "kernel_status": status,
+            "checked_at": datetime.now(timezone.utc).isoformat()
         }
-        print(f"  ✅ {username}: مستخدم {round(hours_used, 2)}h | متبقي {round(remaining, 2)}h")
-        
-    state["account_usage"] = account_usage
+        print(f"  📊 {username}: {status}")
+    state["kernel_status_map"] = kernel_map
     return state
 
+
 def select_available_account(state):
+    """
+    Smart selection: excludes accounts that are (a) disabled, (b) exhausted,
+    or (c) currently running a notebook.
+    """
     if not KAGGLE_ACCOUNTS: return None, 0, []
-    
+
     disabled_accounts = state.get("disabled_accounts", [])
-    active_accounts = [acc for acc in KAGGLE_ACCOUNTS if acc["username"] not in disabled_accounts]
-    
-    if not active_accounts: return None, 0, []
-    
+    kernel_map = state.get("kernel_status_map", {})
+
     account_stats = []
-    real_usage = state.get("account_usage", {})
-    
-    for acc in active_accounts:
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    for acc in KAGGLE_ACCOUNTS:
         username = acc["username"]
-        remaining = real_usage.get(username, {}).get("remaining", 30)
-        
+
+        if username in disabled_accounts:
+            account_stats.append({
+                "username": username, "remaining": 0, "weekly_hours": 30,
+                "sessions": 0, "kernel_status": "disabled", "excluded_reason": "disabled"
+            })
+            continue
+
+        # Real kernel status from kernel_status_map
+        k_entry = kernel_map.get(username, {})
+        kernel_status = k_entry.get("kernel_status", "unknown")
+
+        weekly_hours = 0
+        total_sessions = 0
+        for session in state.get("history", []):
+            if username in session.get("worker_id", ""):
+                total_sessions += 1
+                try:
+                    ts = session["timestamp"]
+                    if ts.endswith("Z"): ts = ts[:-1] + "+00:00"
+                    session_time = datetime.fromisoformat(ts)
+                    if session_time > week_start:
+                        weekly_hours += session.get("gpu_hours", 0)
+                except: pass
+
+        remaining = WEEKLY_GPU_LIMIT_PER_ACCOUNT - weekly_hours
+
+        excluded_reason = None
+        if kernel_status == "running":
+            excluded_reason = "running_now"
+        elif remaining < 2:
+            excluded_reason = "exhausted"
+
         account_stats.append({
             "username": username,
             "remaining": remaining,
-            "weekly_hours": real_usage.get(username, {}).get("used", 0)
+            "weekly_hours": weekly_hours,
+            "sessions": total_sessions,
+            "kernel_status": kernel_status,
+            "excluded_reason": excluded_reason
         })
-    
-    # ترتيب الحسابات بناءً على أعلى ساعات متبقية
-    account_stats.sort(key=lambda x: x["remaining"], reverse=True)
-    
-    if account_stats and account_stats[0]["remaining"] >= 2:
-        best_account = account_stats[0]
-        for i, acc in enumerate(KAGGLE_ACCOUNTS):
-            if acc["username"] == best_account["username"]:
-                return KAGGLE_ACCOUNTS[i], best_account["remaining"], account_stats
-    
+
+    # Pick the best: not excluded, has the most remaining hours
+    candidates = [a for a in account_stats if a["excluded_reason"] is None]
+    candidates.sort(key=lambda x: x["remaining"], reverse=True)
+
+    if candidates:
+        best = candidates[0]
+        for acc in KAGGLE_ACCOUNTS:
+            if acc["username"] == best["username"]:
+                return acc, best["remaining"], account_stats
+
     return None, 0, account_stats
 
-def check_last_session(state):
+
+# ═══════════════════════════════════════════════════════════════
+# ⏱️ Session Gap Tracking (visualizes wasted time)
+# ═══════════════════════════════════════════════════════════════
+
+def compute_session_gaps(state):
+    """Computes idle gaps between consecutive sessions — feeds the dashboard."""
     history = state.get("history", [])
-    if not history: return True
-    last = history[-1]
-    try:
-        last_time = datetime.fromisoformat(last["timestamp"].replace("Z", "+00:00"))
-        hours_since = (datetime.now(last_time.tzinfo) - last_time).total_seconds() / 3600
-        return hours_since >= MIN_HOURS_BETWEEN_SESSIONS
-    except: return True
+    if len(history) < 2: return []
+
+    gaps = []
+    for i in range(1, len(history)):
+        prev = history[i-1]
+        curr = history[i]
+        try:
+            p_end = prev["timestamp"]
+            c_start = curr.get("started_at") or curr["timestamp"]
+            if p_end.endswith("Z"): p_end = p_end[:-1] + "+00:00"
+            if c_start.endswith("Z"): c_start = c_start[:-1] + "+00:00"
+            gap_seconds = (datetime.fromisoformat(c_start) - datetime.fromisoformat(p_end)).total_seconds()
+            if gap_seconds > 0:
+                gaps.append({
+                    "from_session": prev.get("worker_id", "?"),
+                    "to_session": curr.get("worker_id", "?"),
+                    "gap_minutes": round(gap_seconds / 60, 1),
+                    "gap_hours": round(gap_seconds / 3600, 2),
+                    "started_at": c_start
+                })
+        except: pass
+
+    state["session_gaps"] = gaps[-10:]  # keep last 10
+    return state["session_gaps"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🚀 Notebook Launcher
+# ═══════════════════════════════════════════════════════════════
 
 def launch_kaggle_notebook(account):
     username = account["username"]
     key = account["key"]
     try:
-        os.makedirs("/root/.kaggle", exist_ok=True)
-        with open("/root/.kaggle/kaggle.json", "w") as f:
-            json.dump({"username": username, "key": key}, f)
-        os.chmod("/root/.kaggle/kaggle.json", 0o600)
-        subprocess.run(["pip", "install", "-q", "kaggle"], check=True)
-        
-        # حقن اسم المستخدم داخل الكود قبل الرفع
+        if not setup_kaggle_credentials(account):
+            return False
+
+        # Inject the real username into the worker before pushing
         with open("xandra_worker.py", "r") as f:
             worker_code = f.read()
         worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
         with open("xandra_worker.py", "w") as f:
             f.write(worker_code)
-        
-        result = subprocess.run(["kaggle", "kernels", "status", f"{username}/xandra_worker"], capture_output=True, text=True)
-        status_text = result.stdout.lower()
-        if "complete" in status_text or "error" in status_text or "canceled" in status_text or "no kernels found" in status_text:
-            metadata = {
-                "id": f"{username}/xandra_worker", "title": "Xandra Worker",
-                "code_file": "xandra_worker.py", "language": "python",
-                "kernel_type": "script", "is_private": True,
-                "enable_gpu": True, "enable_internet": True
-            }
-            with open("kernel-metadata.json", "w") as f: json.dump(metadata, f)
-            result = subprocess.run(["kaggle", "kernels", "push", "-p", "."], capture_output=True, text=True)
-            if result.returncode == 0: return True
-        return True
-    except: return False
+
+        # Check current status — only push if not already running
+        status = check_kaggle_kernel_status(account)
+        if status == "running":
+            print(f"ℹ️ الـ Notebook على {username} يعمل بالفعل — لا حاجة للإطلاق")
+            return True
+
+        metadata = {
+            "id": f"{username}/xandra_worker", "title": "Xandra Worker",
+            "code_file": "xandra_worker.py", "language": "python",
+            "kernel_type": "script", "is_private": True,
+            "enable_gpu": True, "enable_internet": True
+        }
+        with open("kernel-metadata.json", "w") as f: json.dump(metadata, f)
+        result = subprocess.run(
+            ["kaggle", "kernels", "push", "-p", "."],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print(f"✅ تم إطلاق الـ Notebook على {username}")
+            return True
+        else:
+            print(f"❌ فشل الإطلاق: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"❌ استثناء أثناء الإطلاق: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🎼 Main Orchestration Loop
+# ═══════════════════════════════════════════════════════════════
 
 def main():
+    print("\n" + "=" * 60)
+    print("🎼 Xandra Maestro (Real-time Discovery Edition)")
+    print(f"⏰ {datetime.now(timezone.utc).isoformat()}")
+    print("=" * 60)
+
     state = get_state()
-    
-    # 1. تحديث أرقام الاستهلاك الحقيقية بحسابها من الـ history
-    state = sync_account_quotas(state)
-    
-    # تقرير حالة الحسابات
-    result = select_available_account(state)
-    if result and result[2]:
-        print("📊 تقرير الحسابات:")
-        for acc_stat in result[2]:
-            print(f"  - {acc_stat['username']}: {acc_stat['remaining']:.1f}h متبقية")
-    
-    # حفظ الحالة بعد تحديث الأرقام
-    update_state(state)
-    
-    is_locked, locked_by = check_lock(state)
-    if is_locked:
-        print(f"⏳ النظام مشغول بواسطة: {locked_by}")
+
+    # Step 1: refresh kernel status map (this is the key upgrade)
+    print("\n📡 تحديث خريطة حالة الـ kernels من Kaggle...")
+    state = update_kernel_status_map(state)
+
+    # Step 2: compute session gaps for the dashboard
+    compute_session_gaps(state)
+
+    # Step 3: report account statuses
+    print("\n📊 تقرير الحسابات:")
+    account, remaining_hours, account_stats = select_available_account(state)
+    for s in account_stats:
+        marker = "✅" if s["excluded_reason"] is None else "⛔"
+        reason = f" [{s['excluded_reason']}]" if s["excluded_reason"] else ""
+        print(f"  {marker} {s['username']}: kernel={s['kernel_status']} | "
+              f"remaining={s['remaining']:.1f}h | sessions={s['sessions']}{reason}")
+
+    # Step 4: smart lock check (combines time + real kernel state)
+    is_busy, reason = check_lock(state)
+    if is_busy:
+        print(f"\n⏳ النظام مشغول: {reason} — لن نتدخل")
+        # Still persist kernel_status_map so the dashboard shows fresh data
+        update_state(state)
         return
-    
-    account, remaining_hours, _ = result
+
+    # Step 5: lock is free — release it cleanly + try to launch next
+    if reason and reason != "expired":
+        print(f"\n🔓 تحرير القفل: السبب = {reason}")
+        state = release_lock(state, reason=reason)
+
+    # Step 6: pick the next account
     if not account:
-        print("⚠️ جميع الحسابات مشغولة أو استُنفدت")
+        print("\n⚠️ لا توجد حسابات متاحة (الكل مشغول أو مستهلك)")
         if not state.get("all_accounts_exhausted_alerted"):
-            send_email("⚠️ جميع حسابات كاجل استُنفدت", "تم استنفاد جميع حصص GPU الأسبوعية.")
+            send_email("⚠️ جميع حسابات كاجل استُنفدت",
+                       f"تم استنفاد/اشغال جميع حصص GPU.\n\nآخر تحديث: {datetime.now(timezone.utc).isoformat()}")
             state["all_accounts_exhausted_alerted"] = True
-            update_state(state)
+        update_state(state)
         return
-    
-    if not check_last_session(state):
-        print(f"⏳ لم تمر {MIN_HOURS_BETWEEN_SESSIONS} ساعات بعد على آخر جلسة")
-        return
-    
-    print(f"🚀 إطلاق جلسة تدريب جديدة على {account['username']} (متبقي {remaining_hours:.1f}h)")
+
+    state["all_accounts_exhausted_alerted"] = False
+
+    # Step 7: acquire lock + launch
+    print(f"\n🚀 إطلاق جلسة تدريب جديدة على {account['username']} (متبقي {remaining_hours:.1f}h)")
     state = acquire_lock(state, account["username"])
     state["current_account_index"] = account["index"]
-    state["all_accounts_exhausted_alerted"] = False
     update_state(state)
-    
+
     success = launch_kaggle_notebook(account)
     if not success:
-        send_email(f"🚨 فشل إطلاق جلسة Kaggle ({account['username']})", "حدث خطأ.")
-        state["training_lock"] = {"is_locked": False, "locked_by": None, "locked_at": None, "expires_at": None}
+        send_email(f"🚨 فشل إطلاق جلسة Kaggle ({account['username']})",
+                   f"تعذّر إطلاق الـ Notebook على الحساب {account['username']}.")
+        state = release_lock(state, reason="launch_failed")
         update_state(state)
+    else:
+        print(f"\n✅ تم بنجاح. المايسترو سينام حتى الجولة القادمة.")
+
 
 if __name__ == "__main__":
     main()
