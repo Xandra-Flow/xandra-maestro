@@ -93,32 +93,48 @@ def get_kaggle_config_dir():
 
 
 def setup_kaggle_credentials(account):
-    """Configures kaggle.json for a specific account in a writable location."""
+    """
+    Configures Kaggle credentials for a specific account using THREE methods
+    simultaneously to maximize compatibility:
+      1. Sets KAGGLE_USERNAME and KAGGLE_KEY env vars (works in all CLIs)
+      2. Writes ~/.kaggle/kaggle.json (the official way)
+      3. Sets KAGGLE_CONFIG_DIR env var if HOME is not writable
+    Does NOT install kaggle CLI (that's ensure_kaggle_cli's job, called separately).
+    """
     try:
+        username = account["username"]
+        key = account["key"]
+
+        # Method 1: env vars (most reliable — kaggle CLI checks these first)
+        os.environ['KAGGLE_USERNAME'] = username
+        os.environ['KAGGLE_KEY'] = key
+
+        # Method 2: write kaggle.json to a writable location
         kaggle_dir = get_kaggle_config_dir()
         kaggle_json_path = os.path.join(kaggle_dir, 'kaggle.json')
         with open(kaggle_json_path, 'w') as f:
-            json.dump({"username": account["username"], "key": account["key"]}, f)
+            json.dump({"username": username, "key": key}, f)
         os.chmod(kaggle_json_path, 0o600)
-
-        # Ensure kaggle CLI is installed
-        try:
-            subprocess.run(["kaggle", "--version"], capture_output=True, check=True, timeout=10)
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            subprocess.run(["pip", "install", "-q", "kaggle"], check=True)
 
         return True
     except Exception as e:
         print(f"⚠️ فشل إعداد بيانات اعتماد Kaggle لـ {account['username']}: {e}")
-        return False
+        # Last resort: at least set env vars
+        try:
+            os.environ['KAGGLE_USERNAME'] = account["username"]
+            os.environ['KAGGLE_KEY'] = account["key"]
+            return True
+        except: return False
 
 
 def check_kaggle_kernel_status(account):
     """
-    Queries Kaggle for the real status of xandra_worker notebook via the kaggle CLI.
-    The kaggle CLI is the OFFICIAL and reliable way to query Kaggle.
-    The REST API approach was unreliable (wrong endpoints + auth issues), so we
-    removed it.
+    Queries Kaggle for the real status of xandra-worker notebook via the kaggle CLI.
+
+    KERNEL SLUG DISCOVERY (verified from actual Kaggle URLs):
+    Kaggle URL format: https://www.kaggle.com/code/{username}/{slug}
+    The user's actual notebooks live at: kaggle.com/code/{username}/xandra-worker
+    So the canonical slug is "xandra-worker" (with hyphen, NOT underscore).
 
     Returns one of:
         'running'   → notebook is actively training
@@ -128,37 +144,69 @@ def check_kaggle_kernel_status(account):
         'not_found' → no notebook exists yet (fresh account)
         'unknown'   → could not determine (network/auth error)
     """
+    # Ensure CLI is available (installs if missing — also handles 'six' dep)
+    if not ensure_kaggle_cli():
+        return "unknown"
+
     if not setup_kaggle_credentials(account):
         return "unknown"
 
     username = account["username"]
-    try:
-        # Use kaggle kernels status — the official, reliable method
-        result = subprocess.run(
-            ["kaggle", "kernels", "status", f"{username}/xandra_worker"],
-            capture_output=True, text=True, timeout=30
-        )
-        out = (result.stdout + " " + result.stderr).lower()
+    # The canonical slug verified from real Kaggle URLs:
+    # kaggle.com/code/{username}/xandra-worker
+    # We try the canonical one first, then alternates as fallback
+    possible_slugs = [
+        f"{username}/xandra-worker",      # ✅ CANONICAL — verified from actual URLs
+        f"{username}/xandraworker",       # alternate (no separator)
+        f"{username}/xandra_worker"       # alternate (underscore)
+    ]
 
-        if "no kernels found" in out or "not found" in out or "404" in out:
-            return "not_found"
-        if "running" in out or "in queue" in out:
-            return "running"
-        if "complete" in out:
-            return "complete"
-        if "error" in out or "failed" in out:
-            return "error"
-        if "cancel" in out:
-            return "canceled"
-        # If CLI ran but output is empty/ambiguous, do NOT assume error
-        # — that would exclude the account from selection incorrectly
-        return "unknown"
-    except subprocess.TimeoutExpired:
-        print(f"⏱️ انتهت مهلة الاستعلام عن {username}")
-        return "unknown"
-    except Exception as e:
-        print(f"⚠️ خطأ في فحص حالة الـ kernel لـ {username}: {e}")
-        return "unknown"
+    for slug in possible_slugs:
+        try:
+            result = subprocess.run(
+                ["kaggle", "kernels", "status", slug],
+                capture_output=True, text=True, timeout=30
+            )
+            out = (result.stdout + " " + result.stderr).lower()
+
+            # If kernel not found, try the next slug
+            if "no kernels found" in out or "not found" in out or "404" in out:
+                continue
+
+            # Found a real status
+            if "running" in out or "in queue" in out:
+                return "running"
+            if "complete" in out:
+                return "complete"
+            if "error" in out or "failed" in out:
+                return "error"
+            if "cancel" in out:
+                return "canceled"
+
+            # CLI returned something but ambiguous — check return code
+            if result.returncode == 0:
+                # If stdout is empty, treat as unknown (don't assume error)
+                if not result.stdout.strip():
+                    return "unknown"
+                # Otherwise log the raw output for debugging
+                print(f"   📝 raw output for {slug}: {result.stdout[:200]}")
+                return "unknown"
+            else:
+                # Non-zero exit + non-404 error → auth/network issue
+                if "unauthorized" in out or "401" in out:
+                    print(f"   ⚠️ 401 Unauthorized for {username}")
+                    return "unknown"
+                # For other errors, try next slug
+                continue
+        except subprocess.TimeoutExpired:
+            print(f"⏱️ انتهت مهلة الاستعلام عن {slug}")
+            return "unknown"
+        except Exception as e:
+            print(f"⚠️ خطأ في فحص حالة الـ kernel لـ {username}: {e}")
+            return "unknown"
+
+    # All slugs returned "not found" — this is a fresh account (no kernel yet)
+    return "not_found"
 
 
 def get_state():
@@ -455,8 +503,18 @@ def ensure_kaggle_cli():
 def push_kaggle_kernel_via_api(account, worker_code_path):
     """
     Pushes the kernel via the kaggle CLI (the official method).
-    Despite the function name keeping 'via_api' for backward compat, this
-    actually uses `kaggle kernels push` which internally calls the Kaggle API.
+
+    KERNEL SLUG RULES (verified from actual Kaggle URLs):
+    - Kaggle URL format: kaggle.com/code/{username}/{slug}
+    - Slug is auto-generated from title by:
+        * Converting spaces to hyphens
+        * Converting underscores to hyphens
+        * Lowercasing
+        * Removing other special chars
+    - User's existing notebooks live at: kaggle.com/code/{username}/xandra-worker
+    - So title must be "xandra worker" (with space) or "xandra-worker" (with hyphen)
+      → slug becomes "xandra-worker"
+    - And id must be "{username}/xandra-worker" (matching the slug)
 
     Returns True on success.
     """
@@ -476,15 +534,17 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             f.write(worker_code)
 
         # Create kernel-metadata.json (required by kaggle kernels push)
+        # Use title="xandra worker" → kaggle converts to slug "xandra-worker"
+        # which matches the canonical URL kaggle.com/code/{username}/xandra-worker
         metadata = {
-            "id": f"{username}/xandra_worker",
-            "title": "xandra_worker",
+            "id": f"{username}/xandra-worker",
+            "title": "xandra worker",
             "code_file": "xandra_worker.py",
             "language": "python",
             "kernel_type": "script",
-            "is_private": True,
-            "enable_gpu": True,
-            "enable_internet": True,
+            "is_private": "true",
+            "enable_gpu": "true",
+            "enable_internet": "true",
             "dataset_sources": [],
             "kernel_sources": [],
             "competition_sources": []
@@ -493,20 +553,21 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             json.dump(metadata, f, indent=2)
 
         # Push using the official CLI
+        # Env vars KAGGLE_USERNAME + KAGGLE_KEY are set by setup_kaggle_credentials
         result = subprocess.run(
             ["kaggle", "kernels", "push", "-p", "."],
             capture_output=True, text=True, timeout=120
         )
 
         if result.returncode == 0:
-            print(f"✅ تم رفع الـ Notebook على {username}")
+            print(f"✅ تم رفع الـ Notebook على {username} (slug: xandra-worker)")
             return True
         else:
             stderr = result.stderr or ""
             stdout = result.stdout or ""
             print(f"❌ فشل الرفع عبر CLI (exit {result.returncode})")
-            print(f"   stdout: {stdout[:300]}")
-            print(f"   stderr: {stderr[:300]}")
+            print(f"   stdout: {stdout[:400]}")
+            print(f"   stderr: {stderr[:400]}")
             return False
     except subprocess.TimeoutExpired:
         print(f"⏱️ انتهت مهلة رفع الـ Notebook على {username}")
