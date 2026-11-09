@@ -68,15 +68,44 @@ def send_email(subject, body):
 # 📡 Real-time Kaggle Kernel Status Discovery
 # ═══════════════════════════════════════════════════════════════
 
-def setup_kaggle_credentials(account):
-    """Configures ~/.kaggle/kaggle.json for a specific account before querying."""
+def get_kaggle_config_dir():
+    """Returns a writable directory for kaggle.json (works on GitHub Actions, Kaggle, local)."""
+    # GitHub Actions runners are user 'runner' (not root) — /root/.kaggle is forbidden
+    # Use $HOME/.kaggle if HOME is set, else fall back to ~/.kaggle via os.path.expanduser
+    # If even that fails, use a temp dir (kaggle CLI also reads KAGGLE_CONFIG_DIR env var)
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    kaggle_dir = os.path.join(home, '.kaggle')
     try:
-        os.makedirs("/root/.kaggle", exist_ok=True)
-        with open("/root/.kaggle/kaggle.json", "w") as f:
+        os.makedirs(kaggle_dir, exist_ok=True)
+        # Test write access
+        test_file = os.path.join(kaggle_dir, '.write_test')
+        with open(test_file, 'w') as f: f.write('ok')
+        os.remove(test_file)
+        return kaggle_dir
+    except (PermissionError, OSError):
+        # Fall back to a temp dir
+        import tempfile
+        kaggle_dir = os.path.join(tempfile.gettempdir(), 'kaggle_config')
+        os.makedirs(kaggle_dir, exist_ok=True)
+        os.environ['KAGGLE_CONFIG_DIR'] = kaggle_dir
+        return kaggle_dir
+
+
+def setup_kaggle_credentials(account):
+    """Configures kaggle.json for a specific account in a writable location."""
+    try:
+        kaggle_dir = get_kaggle_config_dir()
+        kaggle_json_path = os.path.join(kaggle_dir, 'kaggle.json')
+        with open(kaggle_json_path, 'w') as f:
             json.dump({"username": account["username"], "key": account["key"]}, f)
-        os.chmod("/root/.kaggle/kaggle.json", 0o600)
-        if not os.path.exists("/usr/local/bin/kaggle"):
+        os.chmod(kaggle_json_path, 0o600)
+
+        # Ensure kaggle CLI is installed
+        try:
+            subprocess.run(["kaggle", "--version"], capture_output=True, check=True, timeout=10)
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             subprocess.run(["pip", "install", "-q", "kaggle"], check=True)
+
         return True
     except Exception as e:
         print(f"⚠️ فشل إعداد بيانات اعتماد Kaggle لـ {account['username']}: {e}")
@@ -85,16 +114,62 @@ def setup_kaggle_credentials(account):
 
 def check_kaggle_kernel_status(account):
     """
-    Queries Kaggle API for the real status of xandra_worker notebook.
+    Queries Kaggle for the real status of xandra_worker notebook.
+    Tries two methods in order:
+      1. Kaggle REST API directly (preferred — no kaggle.json needed)
+      2. Kaggle CLI as a fallback
 
     Returns one of:
-        'running'   → notebook is actively training (DO NOT touch it)
+        'running'   → notebook is actively training
         'complete'  → notebook finished successfully
         'error'     → notebook crashed or errored out
         'canceled'  → notebook was canceled manually
         'not_found' → no notebook exists yet (fresh account)
         'unknown'   → could not determine (network/auth error)
     """
+    # ════════════════════════════════════════════════════════════
+    # Method 1: Direct Kaggle REST API (no kaggle.json file needed)
+    # Works in any environment that has `requests` (always available in Actions)
+    # ════════════════════════════════════════════════════════════
+    try:
+        username = account["username"]
+        key = account["key"]
+        api_url = f"https://www.kaggle.com/api/v1/kernels/status?user_name={username}&page_size=20"
+        auth = (username, key)
+        resp = requests.get(api_url, auth=auth, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            kernels = data.get("status", []) if isinstance(data, dict) else data
+            for k in (kernels or []):
+                # Match by ref or title — both could be 'xandra_worker'
+                ref = (k.get("ref") or k.get("title") or "").lower()
+                if "xandra_worker" in ref:
+                    state = (k.get("status") or k.get("state") or "").lower()
+                    if state in ("running", "runinprogress", "inprogress"):
+                        return "running"
+                    if state in ("complete", "finished", "success"):
+                        return "complete"
+                    if state in ("error", "failed", "failure"):
+                        return "error"
+                    if state in ("cancelled", "canceled"):
+                        return "canceled"
+            return "not_found"  # API reachable, but no xandra_worker found
+        elif resp.status_code == 401:
+            print(f"⚠️ 401 Unauthorized for {username} — تحقق من بيانات الاعتماد")
+            return "unknown"
+        elif resp.status_code == 404:
+            return "not_found"
+        else:
+            print(f"⚠️ Kaggle API استجاب {resp.status_code} لـ {username}")
+            # Fall through to CLI
+    except requests.exceptions.Timeout:
+        print(f"⏱️ انتهت مهلة Kaggle API لـ {account['username']}")
+    except Exception as e:
+        print(f"⚠️ استثناء في Kaggle REST API: {e} — محاولة CLI كبديل")
+
+    # ════════════════════════════════════════════════════════════
+    # Method 2: Kaggle CLI as a fallback (requires kaggle.json)
+    # ════════════════════════════════════════════════════════════
     if not setup_kaggle_credentials(account):
         return "unknown"
 
@@ -374,25 +449,95 @@ def compute_session_gaps(state):
 # 🚀 Notebook Launcher
 # ═══════════════════════════════════════════════════════════════
 
+def push_kaggle_kernel_via_api(account, worker_code_path):
+    """
+    Pushes the kernel via Kaggle REST API directly (no kaggle.json, no CLI).
+    POST https://www.kaggle.com/api/v1/kernels/push
+    """
+    try:
+        username = account["username"]
+        key = account["key"]
+
+        with open(worker_code_path, "r") as f:
+            worker_code = f.read()
+        # Inject real username
+        worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
+        with open(worker_code_path, "w") as f:
+            f.write(worker_code)
+
+        # Build the kernel push payload as multipart/form-data
+        # Kaggle API expects: text=code, kernel_type=script, is_private=true,
+        #                    enable_gpu=true, enable_internet=true, title=..., id=...
+        import uuid
+        boundary = '----Xandra' + uuid.uuid4().hex
+
+        def field(name, value):
+            return (f'--{boundary}\r\n'
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f'{value}\r\n').encode('utf-8')
+
+        def file_field(name, filename, content):
+            return (f'--{boundary}\r\n'
+                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                    f'Content-Type: text/plain\r\n\r\n').encode('utf-8') + content + b'\r\n'
+
+        body = b''
+        body += field('id', f'{username}/xandra_worker')
+        body += field('title', 'xandra_worker')
+        body += field('language', 'python')
+        body += field('kernel_type', 'script')
+        body += field('is_private', 'true')
+        body += field('enable_gpu', 'true')
+        body += field('enable_internet', 'true')
+        body += file_field('file', 'xandra_worker.py', worker_code.encode('utf-8'))
+        body += f'--{boundary}--\r\n'.encode('utf-8')
+
+        resp = requests.post(
+            'https://www.kaggle.com/api/v1/kernels/push',
+            auth=(username, key),
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            data=body,
+            timeout=60
+        )
+
+        if resp.status_code in (200, 201, 202):
+            print(f"✅ تم رفع الـ Notebook على {username} عبر REST API")
+            return True
+        else:
+            print(f"❌ فشل الرفع: HTTP {resp.status_code}: {resp.text[:300]}")
+            return False
+    except Exception as e:
+        print(f"❌ استثناء أثناء الرفع عبر API: {e}")
+        return False
+
+
 def launch_kaggle_notebook(account):
     username = account["username"]
     key = account["key"]
     try:
-        if not setup_kaggle_credentials(account):
-            return False
-
-        # Inject the real username into the worker before pushing
-        with open("xandra_worker.py", "r") as f:
-            worker_code = f.read()
-        worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
-        with open("xandra_worker.py", "w") as f:
-            f.write(worker_code)
-
-        # Check current status — only push if not already running
+        # Check current status first — skip if already running
         status = check_kaggle_kernel_status(account)
         if status == "running":
             print(f"ℹ️ الـ Notebook على {username} يعمل بالفعل — لا حاجة للإطلاق")
             return True
+
+        worker_code_path = "xandra_worker.py"
+
+        # Try Method 1: REST API (preferred — works everywhere)
+        if push_kaggle_kernel_via_api(account, worker_code_path):
+            return True
+
+        # Method 2: CLI as fallback
+        print("⚠️ الرفع عبر API فشل — محاولة عبر kaggle CLI...")
+        if not setup_kaggle_credentials(account):
+            return False
+
+        # Inject the username again (in case it was overwritten)
+        with open(worker_code_path, "r") as f:
+            worker_code = f.read()
+        worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
+        with open(worker_code_path, "w") as f:
+            f.write(worker_code)
 
         metadata = {
             "id": f"{username}/xandra_worker", "title": "Xandra Worker",
@@ -406,10 +551,10 @@ def launch_kaggle_notebook(account):
             capture_output=True, text=True
         )
         if result.returncode == 0:
-            print(f"✅ تم إطلاق الـ Notebook على {username}")
+            print(f"✅ تم إطلاق الـ Notebook على {username} عبر CLI")
             return True
         else:
-            print(f"❌ فشل الإطلاق: {result.stderr}")
+            print(f"❌ فشل الإطلاق عبر CLI: {result.stderr}")
             return False
     except Exception as e:
         print(f"❌ استثناء أثناء الإطلاق: {e}")
