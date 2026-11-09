@@ -1,4 +1,4 @@
-# Xandra Maestro - كل ساعة
+# Xandra Maestro - Multi-Account Edition (كل ساعة)
 name: Xandra Maestro
 
 on:
@@ -25,12 +25,36 @@ jobs:
           pip install -q requests huggingface_hub pyyaml
           pip install -q kaggle
       
-      - name: 🎵 Run Maestro
+      - name: 🎵 Run Maestro (Multi-Account)
         env:
           HF_REPO: ${{ secrets.HF_REPO }}
           HF_TOKEN_OWNER: ${{ secrets.HF_TOKEN_OWNER }}
+          
+          # الحساب 1
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          
+          # الحساب 2
+          KAGGLE_USERNAME_2: ${{ secrets.KAGGLE_USERNAME_2 }}
+          KAGGLE_KEY_2: ${{ secrets.KAGGLE_KEY_2 }}
+          
+          # الحساب 3
+          KAGGLE_USERNAME_3: ${{ secrets.KAGGLE_USERNAME_3 }}
+          KAGGLE_KEY_3: ${{ secrets.KAGGLE_KEY_3 }}
+          
+          # الحساب 4
+          KAGGLE_USERNAME_4: ${{ secrets.KAGGLE_USERNAME_4 }}
+          KAGGLE_KEY_4: ${{ secrets.KAGGLE_KEY_4 }}
+          
+          # الحساب 5
+          KAGGLE_USERNAME_5: ${{ secrets.KAGGLE_USERNAME_5 }}
+          KAGGLE_KEY_5: ${{ secrets.KAGGLE_KEY_5 }}
+          
+          # الحساب 6
+          KAGGLE_USERNAME_6: ${{ secrets.KAGGLE_USERNAME_6 }}
+          KAGGLE_KEY_6: ${{ secrets.KAGGLE_KEY_6 }}
+          
+          # Gmail
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
