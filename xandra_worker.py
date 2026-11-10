@@ -71,7 +71,7 @@ try:
     HF_TOKEN = secrets.get_secret("HF_TOKEN")
     HF_REPO = secrets.get_secret("HF_REPO")
 except:
-    HF_TOKEN = os.environ.get("HF_TOKEN", "ضع_hf_token_هنا")
+    HF_TOKEN = os.environ.get("HF_TOKEN", "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")
     HF_REPO = os.environ.get("HF_REPO", "smart-force/xandra-training-state")
 
 os.environ['HF_TOKEN'] = HF_TOKEN
@@ -457,6 +457,39 @@ try:
                 # 🫀 Heartbeat
                 state['current_step'] = step
                 state['current_loss'] = loss.item() * GRAD_ACCUM_STEPS
+                # 📊 Record loss history for the dashboard's loss curve
+                if 'loss_history' not in state:
+                    state['loss_history'] = []
+                state['loss_history'].append({
+                    'step': step,
+                    'loss': loss.item() * GRAD_ACCUM_STEPS,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                })
+                # Keep only last 100 data points to avoid bloating state.json
+                if len(state['loss_history']) > 100:
+                    state['loss_history'] = state['loss_history'][-100:]
+                # 📖 Record a training sample so the dashboard shows what the model is learning
+                if 'training_samples' not in state:
+                    state['training_samples'] = []
+                # Record one sample every SAVE_EVERY steps (for variety)
+                try:
+                    sample_text = tokenizer.decode(batch[0][:50])  # decode first 50 tokens
+                    state['training_samples'].append({
+                        'step': step,
+                        'loss': loss.item() * GRAD_ACCUM_STEPS,
+                        'text': sample_text[:200],  # cap at 200 chars
+                        'source': 'mixed_stream',
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    })
+                    # Keep only last 50 samples
+                    if len(state['training_samples']) > 50:
+                        state['training_samples'] = state['training_samples'][-50:]
+                except: pass
+                # 📅 Record project start date (first time only)
+                if 'project_start_date' not in state or not state['project_start_date']:
+                    state['project_start_date'] = SESSION_STARTED_AT
+                # 📊 Track total project hours (cumulative, never resets)
+                state['total_project_hours'] = state.get('total_project_hours', 0) + (MAX_TIME_MINUTES / 60 / (state.get('target_steps', 500000) / SAVE_EVERY)) if i > 0 else state.get('total_project_hours', 0)
                 heartbeat(state, step)
             except Exception as e:
                 print(f"⚠️ فشل حفظ checkpoint: {e}")
@@ -506,6 +539,22 @@ finally:
             state['best_loss'] = min(state.get('best_loss', float('inf')), final_loss)
             state['updated_at'] = datetime.now(timezone.utc).isoformat()
             state['gpu_hours_used'] = state.get('gpu_hours_used', 0) + gpu_hours
+            # 📊 Total project hours — cumulative across ALL sessions, never resets
+            state['total_project_hours'] = state.get('total_project_hours', 0) + gpu_hours
+            # 📅 Project start date — recorded once on first session ever
+            if 'project_start_date' not in state or not state['project_start_date']:
+                state['project_start_date'] = SESSION_STARTED_AT
+            # 📊 Append final loss to loss_history for dashboard
+            if 'loss_history' not in state:
+                state['loss_history'] = []
+            state['loss_history'].append({
+                'step': step,
+                'loss': final_loss,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'session_end': True
+            })
+            if len(state['loss_history']) > 100:
+                state['loss_history'] = state['loss_history'][-100:]
 
             state.setdefault('history', []).append({
                 'timestamp': datetime.now(timezone.utc).isoformat(),
