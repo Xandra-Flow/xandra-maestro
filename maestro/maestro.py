@@ -924,7 +924,7 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             "title": "xandra worker",
             "text": worker_code,
             "language": "python",
-            "kernelType": "notebook",
+            "kernelType": "script",
             "isPrivate": True,
             "enableGpu": True,
             "enableInternet": True,
@@ -1003,10 +1003,34 @@ def launch_kaggle_notebook(account):
             return True
 
         # Use the unified push function (handles CLI installation + credentials + push)
-        return push_kaggle_kernel_via_api(account, "xandra_worker.py")
+        # Note: worker code is assumed to be in the parent dir or same dir
+        worker_path = os.path.join(os.path.dirname(__file__), "..", "kaggle-worker", "xandra_worker.py")
+        if not os.path.exists(worker_path):
+            worker_path = "xandra_worker.py" # fallback
+        return push_kaggle_kernel_via_api(account, worker_path)
     except Exception as e:
         print(f"❌ استثناء أثناء الإطلاق: {e}")
         return False
+
+
+def verify_kaggle_running(expected_step, wait_sec=300):
+    """
+    Waits for some time, then checks if current_step in state.json has increased.
+    This confirms the notebook actually started training and didn't crash at startup.
+    """
+    import time as _time
+    print(f"⏱️ الانتظار لمدة {wait_sec} ثانية للتحقق من بدء التدريب فعلياً...")
+    _time.sleep(wait_sec)
+    
+    new_state = get_state()
+    new_step = new_state.get('current_step', 0)
+    
+    if new_step > expected_step:
+        print(f"   ✅ تم تأكيد التشغيل: الخطوة زادت من {expected_step:,} إلى {new_step:,}")
+        return True, new_step
+    else:
+        print(f"   ⚠️ لم يتم رصد تقدم بعد {wait_sec} ثانية (الخطوة ما زالت {new_step:,})")
+        return False, new_step
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1077,33 +1101,37 @@ def main():
     else:
         # 📧 Send SUCCESS email with a brief report
         current_step = state.get('current_step', 0)
+        
+        # 🆕 Verification Step: wait 5 mins and check progress
+        # This is a bit slow for a cron but critical for reliability
+        is_progressing, verified_step = verify_kaggle_running(current_step, wait_sec=360) # 6 mins
+        
         target_steps = state.get('target_steps', 500000)
-        progress_pct = (current_step / target_steps * 100) if target_steps > 0 else 0
+        progress_pct = (verified_step / target_steps * 100) if target_steps > 0 else 0
         current_loss = state.get('current_loss', 'N/A')
         gpu_hours = state.get('gpu_hours_used', 0)
         total_sessions = len(state.get('history', []))
 
+        status_msg = "✅ تم التحقق من التقدم" if is_progressing else "⚠️ لم يتم رصد تقدم (قد ينهار قريباً)"
+        
         success_body = f"""
 <div dir="rtl" style="font-family:Arial;direction:rtl;text-align:right">
-<h2 style="color:#48bb78">✅ تم إطلاق جلسة تدريب جديدة بنجاح!</h2>
+<h2 style="color:{'#48bb78' if is_progressing else '#ed8936'}">{status_msg}</h2>
 <table style="border-collapse:collapse;width:100%">
 <tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">👤 الحساب</td><td style="padding:8px;border:1px solid #ddd"><strong>{account['username']}</strong></td></tr>
 <tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">⏱️ الساعات المتبقية</td><td style="padding:8px;border:1px solid #ddd">{remaining_hours:.1f}h / 30h</td></tr>
-<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📊 الخطوة الحالية</td><td style="padding:8px;border:1px solid #ddd">{current_step:,} / {target_steps:,} ({progress_pct:.1f}%)</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📊 الخطوة (عند الإطلاق)</td><td style="padding:8px;border:1px solid #ddd">{current_step:,}</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📈 الخطوة الحالية (بعد 6د)</td><td style="padding:8px;border:1px solid #ddd"><strong>{verified_step:,}</strong></td></tr>
 <tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📉 الخسارة الحالية</td><td style="padding:8px;border:1px solid #ddd">{current_loss}</td></tr>
 <tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">⏰ إجمالي ساعات GPU</td><td style="padding:8px;border:1px solid #ddd">{gpu_hours:.1f}h</td></tr>
-<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📦 إجمالي الجلسات</td><td style="padding:8px;border:1px solid #ddd">{total_sessions}</td></tr>
 <tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">🌐 slug</td><td style="padding:8px;border:1px solid #ddd">{account['username']}/xandra-worker</td></tr>
-<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">⏰ الوقت</td><td style="padding:8px;border:1px solid #ddd">{datetime.now(timezone.utc).isoformat()}</td></tr>
 </table>
 <p style="margin-top:15px;color:#666">رابط الـ Notebook: <a href="https://www.kaggle.com/code/{account['username']}/xandra-worker">kaggle.com/code/{account['username']}/xandra-worker</a></p>
-<p style="color:#666">الجولة القادمة من المايسترو ستكون بعد ساعة للتحقق من التقدم.</p>
 </div>
 """
-        send_email(f"✅ بدء تدريب جديد على {account['username']} (خطوة {current_step:,})",
+        send_email(f"{'✅' if is_progressing else '⚠️'} تدريب {account['username']} (خطوة {verified_step:,})",
                    success_body)
-        print(f"\n✅ تم بنجاح. المايسترو سينام حتى الجولة القادمة.")
-        print(f"📧 تم إرسال تقرير النجاح إلى {EMAIL_TO}")
+        print(f"\n✅ اكتملت المهمة. حالة التقدم: {'ناجح' if is_progressing else 'غير مؤكد'}")
 
 
 if __name__ == "__main__":
