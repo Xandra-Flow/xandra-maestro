@@ -271,15 +271,22 @@ def setup_kaggle_credentials(account):
 def get_kaggle_auth(account):
     """
     Returns a requests auth tuple or headers dict for the Kaggle REST API.
-    Works with BOTH Legacy credentials AND new KGAT_ tokens.
+    Works with BOTH Legacy credentials AND new API tokens.
 
-    Auto-detection logic (lenient — handles whitespace, case, Bearer prefix):
-      - If key (after stripping) starts with "KGAT_" (case-insensitive) → Bearer token
-      - Else → Basic auth (username, key) — Legacy API key
+    Detection logic (smart — handles any token format):
+      - If KAGGLE_API_TOKEN env var is set (any value) → Bearer token
+      - If KAGGLE_KEY looks like a long opaque token (not 32-char hex) → Bearer token
+      - Else → Basic auth (username, key) — Legacy API key (32-char hex)
+
+    Per official Kaggle docs (https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md):
+      - New API tokens are obtained from kaggle.com/settings/api "Generate New Token"
+      - They're set via KAGGLE_API_TOKEN env var OR stored in ~/.kaggle/access_token
+      - Legacy API keys are 32-char hex from kaggle.json file
+      - Both work with REST API (newer: Bearer, legacy: Basic auth)
 
     Returns: (auth, headers) tuple
       - For Legacy: auth=(username, key), headers={}
-      - For KGAT_ token: auth=None, headers={'Authorization': 'Bearer {token}'}
+      - For API token: auth=None, headers={'Authorization': 'Bearer {token}'}
     """
     if account.get("auth_method") == "api_token":
         token = account.get("api_token", "").strip()
@@ -288,18 +295,27 @@ def get_kaggle_auth(account):
             token = token[len("Bearer "):]
         return None, {'Authorization': f'Bearer {token}'}
     else:
-        # Legacy mode — but check if the key is actually a KGAT_ token
+        # Legacy mode — but the key might actually be a new API token
+        # stored in KAGGLE_KEY by mistake.
         key = account.get("key", "").strip()
-        # Strip "Bearer " prefix if present
-        if key.lower().startswith("bearer "):
-            key = key[len("Bearer "):].strip()
-        # Case-insensitive check for KGAT_ prefix
-        if key.lower().startswith("kgat_"):
-            # It's actually a KGAT_ token, use Bearer auth
+        username = account.get("username", "")
+
+        # Detect if this is actually a new API token (not a Legacy key):
+        # 1. If it starts with "KGAT_" → definitely new token
+        # 2. If it's NOT 32-char hex (legacy keys are exactly 32 hex chars)
+        is_kgat = key.lower().startswith("kgat_")
+        is_32_hex = len(key) == 32 and all(c in '0123456789abcdefABCDEF' for c in key)
+
+        if is_kgat or not is_32_hex:
+            # It's a new API token (KGAT_ or any other opaque format)
+            # Strip "Bearer " prefix if present
+            if key.lower().startswith("bearer "):
+                key = key[len("Bearer "):]
             return None, {'Authorization': f'Bearer {key}'}
         else:
-            # Genuine Legacy API key — use Basic auth
-            return (account["username"], key), {}
+            # Genuine Legacy API key — 32-char hex — use Basic auth
+            return (username, key), {}
+
 
 
 def kaggle_api_get(account, endpoint, params=None, timeout=30):
@@ -615,18 +631,26 @@ def update_kernel_status_map(state):
     Also fetches the real username for accounts using KAGGLE_API_TOKEN
     (since the token alone doesn't reveal the username).
     """
-    # Print auth method summary for debugging
+    # Print auth method summary for debugging — show first 12 chars to verify format
     auth_summary = []
     for acc in KAGGLE_ACCOUNTS:
         if acc.get("auth_method") == "api_token":
-            auth_summary.append(f"{acc['username']}:KGAT_token")
+            token = acc.get("api_token", "")
+            preview = token[:12] + "..." if len(token) > 12 else token
+            auth_summary.append(f"{acc['username']}:Bearer(token={preview})")
         else:
             key = acc.get("key", "")
-            if key.startswith("KGAT_"):
-                auth_summary.append(f"{acc['username']}:KGAT_in_KEY")
+            preview = key[:12] + "..." if len(key) > 12 else key
+            # Detect actual type using same logic as get_kaggle_auth
+            is_kgat = key.lower().startswith("kgat_")
+            is_32_hex = len(key) == 32 and all(c in '0123456789abcdefABCDEF' for c in key)
+            if is_kgat or not is_32_hex:
+                auth_summary.append(f"{acc['username']}:Bearer(key={preview}) [not 32-hex]")
             else:
-                auth_summary.append(f"{acc['username']}:legacy")
-    print(f"🔐 طرق المصادقة: {', '.join(auth_summary)}")
+                auth_summary.append(f"{acc['username']}:Basic(key={preview}) [32-hex legacy]")
+    print(f"🔐 طرق المصادقة:")
+    for line in auth_summary:
+        print(f"   {line}")
 
     kernel_map = {}
     for acc in KAGGLE_ACCOUNTS:
@@ -846,16 +870,20 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
         # Build the form data for POST /api/v1/kernels/push
         # The Kaggle API expects application/x-www-form-urlencoded with:
         #   - text: the code content (NOT a file upload!)
-        #   - id, title, language, kernel_type, is_private, enable_gpu, enable_internet
+        #   - slug: "USERNAME/KERNEL-SLUG" (NOT id — id must be numeric!)
+        #   - title, language, kernel_type, is_private, enable_gpu, enable_internet
+        # Per https://www.withone.ai/knowledge/kaggle/...:
+        #   "One of id and slug are required. If both are specified, id will be preferred."
+        #   "The slug format is USERNAME/KERNEL-SLUG"
         form_data = {
-            "id": f"{username}/xandra-worker",
-            "title": "xandra worker",        # kaggle converts to slug "xandra-worker"
+            "slug": f"{username}/xandra-worker",   # ← use slug, NOT id (id must be numeric)
+            "title": "xandra worker",              # kaggle converts to slug "xandra-worker"
             "language": "python",
             "kernel_type": "script",
             "is_private": "true",
             "enable_gpu": "true",
             "enable_internet": "true",
-            "text": worker_code,             # ← code as text field, not file upload
+            "text": worker_code,                   # ← code as text field, not file upload
             "dataset_sources": "",
             "kernel_sources": "",
             "competition_sources": ""
