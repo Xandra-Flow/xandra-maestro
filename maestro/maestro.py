@@ -273,15 +273,30 @@ def get_kaggle_auth(account):
     Returns a requests auth tuple or headers dict for the Kaggle REST API.
     Works with BOTH Legacy credentials AND new KGAT_ tokens.
 
+    Auto-detection logic:
+      - If key starts with "KGAT_" → use as Bearer token (new API token)
+      - Else → use as Basic auth (username, key) — Legacy API key
+
     Returns: (auth, headers) tuple
       - For Legacy: auth=(username, key), headers={}
       - For KGAT_ token: auth=None, headers={'Authorization': 'Bearer {token}'}
     """
     if account.get("auth_method") == "api_token":
         token = account.get("api_token", "")
+        # Strip any existing "Bearer " prefix to avoid duplication
+        if token.startswith("Bearer "):
+            token = token[len("Bearer "):]
         return None, {'Authorization': f'Bearer {token}'}
     else:
-        return (account["username"], account.get("key", "")), {}
+        # Legacy mode — but check if the key is actually a KGAT_ token
+        # (some users store KGAT_ tokens in KAGGLE_KEY by mistake)
+        key = account.get("key", "")
+        if key.startswith("KGAT_"):
+            # It's actually a KGAT_ token, use Bearer auth
+            return None, {'Authorization': f'Bearer {key}'}
+        else:
+            # Genuine Legacy API key — use Basic auth
+            return (account["username"], key), {}
 
 
 def kaggle_api_get(account, endpoint, params=None, timeout=30):
@@ -596,6 +611,19 @@ def update_kernel_status_map(state):
     Also fetches the real username for accounts using KAGGLE_API_TOKEN
     (since the token alone doesn't reveal the username).
     """
+    # Print auth method summary for debugging
+    auth_summary = []
+    for acc in KAGGLE_ACCOUNTS:
+        if acc.get("auth_method") == "api_token":
+            auth_summary.append(f"{acc['username']}:KGAT_token")
+        else:
+            key = acc.get("key", "")
+            if key.startswith("KGAT_"):
+                auth_summary.append(f"{acc['username']}:KGAT_in_KEY")
+            else:
+                auth_summary.append(f"{acc['username']}:legacy")
+    print(f"🔐 طرق المصادقة: {', '.join(auth_summary)}")
+
     kernel_map = {}
     for acc in KAGGLE_ACCOUNTS:
         # Fetch real username for API token accounts (first time only)
