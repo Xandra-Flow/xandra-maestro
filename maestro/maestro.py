@@ -344,15 +344,19 @@ def kaggle_api_get(account, endpoint, params=None, timeout=30):
 def kaggle_api_post(account, endpoint, data=None, files=None, timeout=60):
     """
     Makes a POST request to the Kaggle REST API (for pushing kernels).
-    Uses multipart/form-data when files is provided.
+    - When files is provided: uses multipart/form-data
+    - When files is None: uses application/x-www-form-urlencoded (NOT json)
+      because Kaggle API expects form data, not JSON
     """
     auth, headers = get_kaggle_auth(account)
     url = f"https://www.kaggle.com/api/v1/{endpoint.lstrip('/')}"
     try:
         if files:
+            # multipart/form-data (file upload)
             resp = requests.post(url, auth=auth, headers=headers, data=data, files=files, timeout=timeout)
         else:
-            resp = requests.post(url, auth=auth, headers=headers, json=data, timeout=timeout)
+            # application/x-www-form-urlencoded (form data, NOT json)
+            resp = requests.post(url, auth=auth, headers=headers, data=data, timeout=timeout)
         try:
             resp_data = resp.json()
         except:
@@ -853,7 +857,7 @@ def ensure_kaggle_cli():
 def push_kaggle_kernel_via_api(account, worker_code_path):
     """
     Pushes the kernel via the Kaggle REST API directly (POST /api/v1/kernels/push).
-    Uses application/x-www-form-urlencoded with the code as a 'text' field.
+    Tries BOTH JSON and form-urlencoded payloads for maximum compatibility.
 
     This bypasses kaggle CLI entirely — no auth issues, no env vars, no file paths.
 
@@ -867,49 +871,84 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
         # Inject the real username
         worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
 
-        # Build the form data for POST /api/v1/kernels/push
-        # The Kaggle API expects application/x-www-form-urlencoded with:
-        #   - text: the code content (NOT a file upload!)
-        #   - slug: "USERNAME/KERNEL-SLUG" (NOT id — id must be numeric!)
-        #   - title, language, kernel_type, is_private, enable_gpu, enable_internet
-        # Per https://www.withone.ai/knowledge/kaggle/...:
-        #   "One of id and slug are required. If both are specified, id will be preferred."
-        #   "The slug format is USERNAME/KERNEL-SLUG"
-        form_data = {
-            "slug": f"{username}/xandra-worker",   # ← use slug, NOT id (id must be numeric)
-            "title": "xandra worker",              # kaggle converts to slug "xandra-worker"
+        # Get auth + headers
+        auth, headers = get_kaggle_auth(account)
+        url = "https://www.kaggle.com/api/v1/kernels/push"
+
+        # ═══════════════════════════════════════════════════════════════
+        # Try Method 1: JSON payload (per the other model's suggestion)
+        # Uses camelCase field names (kernelType, isPrivate, etc.)
+        # because the modern Kaggle API may expect them
+        # ═══════════════════════════════════════════════════════════════
+        json_payload = {
+            "ref": f"{username}/xandra-worker",
+            "title": "xandra worker",
+            "text": worker_code,
+            "language": "python",
+            "kernelType": "script",
+            "isPrivate": True,
+            "enableGpu": True,
+            "enableInternet": True,
+            "datasetSources": [],
+            "kernelSources": [],
+            "competitionSources": []
+        }
+
+        json_headers = dict(headers)
+        json_headers['Content-Type'] = 'application/json'
+
+        try:
+            resp = requests.post(url, auth=auth, headers=json_headers, json=json_payload, timeout=120)
+            code = resp.status_code
+            resp_text = resp.text
+            if code in (200, 201, 202):
+                print(f"✅ تم رفع الـ Notebook على {username} (slug: xandra-worker) [JSON]")
+                return True
+            # If JSON failed, fall through to form-data method
+            print(f"   📝 JSON method returned HTTP {code}, trying form-data...")
+        except Exception as e:
+            print(f"   📝 JSON method failed: {e}, trying form-data...")
+
+        # ═══════════════════════════════════════════════════════════════
+        # Try Method 2: application/x-www-form-urlencoded (legacy API format)
+        # Uses snake_case field names (kernel_type, is_private, etc.)
+        # ═══════════════════════════════════════════════════════════════
+        form_payload = {
+            "slug": f"{username}/xandra-worker",
+            "title": "xandra worker",
+            "text": worker_code,
             "language": "python",
             "kernel_type": "script",
             "is_private": "true",
             "enable_gpu": "true",
             "enable_internet": "true",
-            "text": worker_code,                   # ← code as text field, not file upload
             "dataset_sources": "",
             "kernel_sources": "",
             "competition_sources": ""
         }
 
-        # POST to the Kaggle REST API (no files — just form data)
-        code, resp_data, resp_text = kaggle_api_post(
-            account, "kernels/push", data=form_data, files=None, timeout=120
-        )
+        try:
+            resp = requests.post(url, auth=auth, headers=headers, data=form_payload, timeout=120)
+            code = resp.status_code
+            resp_text = resp.text
+            if code in (200, 201, 202):
+                print(f"✅ تم رفع الـ Notebook على {username} (slug: xandra-worker) [form-data]")
+                return True
+        except Exception as e:
+            resp_text = str(e)
 
-        if code in (200, 201, 202):
-            print(f"✅ تم رفع الـ Notebook على {username} (slug: xandra-worker)")
-            return True
-        elif code == 401:
+        # Both methods failed — report the error
+        if code == 401:
             print(f"❌ فشل المصادقة لـ {username} (HTTP 401) — تحقق من الـ credentials")
             print(f"   Response: {resp_text[:300]}")
-            return False
         elif code == 403:
             print(f"❌ محظور لـ {username} (HTTP 403) — الـ token لا يملك صلاحيات kernels.update")
             print(f"   → أعد إنشاء الـ token مع scope: kernels.update")
             print(f"   Response: {resp_text[:300]}")
-            return False
         else:
-            print(f"❌ فشل الرفع (HTTP {code})")
+            print(f"❌ فشل الرفع لـ {username} (HTTP {code})")
             print(f"   Response: {resp_text[:400]}")
-            return False
+        return False
     except Exception as e:
         print(f"❌ استثناء أثناء الرفع: {e}")
         return False
