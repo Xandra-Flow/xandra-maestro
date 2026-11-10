@@ -544,18 +544,21 @@ def check_lock(state):
                 # Notebook doesn't exist on this account → lock is stale
                 return False, "kernel_not_found"
             elif kernel_state == "unknown_via_lock":
-                # 403 from Kaggle API — can't verify, so check lock age
-                # If lock is older than 2 hours, assume session ended
+                # 403 from Kaggle API — can't verify via API
+                # Check lock age: if older than 30 minutes, release it
+                # (Kaggle notebooks that crash still hold the lock, but
+                #  the Worker's finally block should release it. If it didn't,
+                #  it means the Worker crashed before reaching finally.)
                 locked_at = lock.get("locked_at")
                 if locked_at:
                     try:
                         la_time = datetime.fromisoformat(locked_at.replace("Z", "+00:00"))
                         age_hours = (now - la_time).total_seconds() / 3600
-                        if age_hours > 2:
-                            print(f"⚠️ قفل عمره {age_hours:.1f} ساعة مع 403 — تحرير")
+                        if age_hours > 0.5:  # 30 minutes
+                            print(f"⚠️ قفل عمره {age_hours:.1f} ساعة مع 403 — تحرير (قد يكون Notebook معلّقاً)")
                             return False, "stale_lock_403"
                     except: pass
-                # Lock is fresh — can't verify, assume running
+                # Lock is fresh (< 30 min) — assume running
                 return True, "running_assumed"
             # else: unknown → fall through to time-based check
 
