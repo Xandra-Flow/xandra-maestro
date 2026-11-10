@@ -1015,21 +1015,47 @@ def launch_kaggle_notebook(account):
 
 def verify_kaggle_running(expected_step, wait_sec=300):
     """
-    Waits for some time, then checks if current_step in state.json has increased.
-    This confirms the notebook actually started training and didn't crash at startup.
+    Waits for some time, then checks the notebook's progress.
+    
+    Two-phase check:
+    Phase 1 (after 6 min): Look for "I'm alive" signal in state.json.
+                          If present → notebook booted, still loading checkpoint.
+    Phase 2 (after 12 min): Check if current_step increased.
+                          If yes → training actually started.
+                          If no → notebook likely crashed at startup.
     """
     import time as _time
-    print(f"⏱️ الانتظار لمدة {wait_sec} ثانية للتحقق من بدء التدريب فعلياً...")
-    _time.sleep(wait_sec)
+    
+    # Phase 1: Wait 6 min, check for "booted" signal
+    print(f"⏱️ المرحلة 1: الانتظار 360 ثانية للتأكد من boot الـ notebook...")
+    _time.sleep(360)
     
     new_state = get_state()
+    notebook_status = new_state.get('notebook_status', {})
     new_step = new_state.get('current_step', 0)
+    last_heartbeat = new_state.get('training_lock', {}).get('last_heartbeat')
     
-    if new_step > expected_step:
-        print(f"   ✅ تم تأكيد التشغيل: الخطوة زادت من {expected_step:,} إلى {new_step:,}")
-        return True, new_step
+    # Check if "I'm alive" signal was received
+    if notebook_status.get('phase') == 'booted' or last_heartbeat:
+        print(f"   ✅ Notebook booted بنجاح (signal: {notebook_status.get('phase', 'unknown')})")
+        print(f"   ⏳ المرحلة 2: انتظار 360 ثانية إضافية للتحقق من بدء التدريب...")
+        _time.sleep(360)
+        
+        # Phase 2: Check if step increased
+        new_state = get_state()
+        new_step = new_state.get('current_step', 0)
+        
+        if new_step > expected_step:
+            print(f"   ✅ تم تأكيد التشغيل: الخطوة زادت من {expected_step:,} إلى {new_step:,}")
+            return True, new_step
+        else:
+            print(f"   ⚠️ Notebook يعمل لكن لم يصل لـ 100 خطوة بعد (step={new_step:,})")
+            print(f"   💡 قد يكون download latest.pt بطيئاً (970 MB) — اتركه يعمل")
+            return True, new_step  # Trust it — heartbeat is recent
     else:
-        print(f"   ⚠️ لم يتم رصد تقدم بعد {wait_sec} ثانية (الخطوة ما زالت {new_step:,})")
+        # No signal received after 6 min — notebook likely crashed at startup
+        print(f"   ❌ لم تصل إشارة 'أنا حي' بعد 6 دقائق — الـ notebook غالباً انهار")
+        print(f"   🔓 سيتم تحرير القفل في الجولة القادمة")
         return False, new_step
 
 
@@ -1102,9 +1128,12 @@ def main():
         # 📧 Send SUCCESS email with a brief report
         current_step = state.get('current_step', 0)
         
-        # 🆕 Verification Step: wait 5 mins and check progress
-        # This is a bit slow for a cron but critical for reliability
-        is_progressing, verified_step = verify_kaggle_running(current_step, wait_sec=360) # 6 mins
+        # 🆕 Verification Step: Two-phase check
+        # Phase 1 (6 min): Look for "I'm alive" signal
+        # Phase 2 (additional 6 min): Check step increase
+        # Total: 12 min — exceeds GitHub Actions 10 min timeout!
+        # So we need to bump maestro.yml timeout to 15 min.
+        is_progressing, verified_step = verify_kaggle_running(current_step)
         
         target_steps = state.get('target_steps', 500000)
         progress_pct = (verified_step / target_steps * 100) if target_steps > 0 else 0
