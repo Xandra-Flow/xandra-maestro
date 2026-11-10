@@ -273,25 +273,28 @@ def get_kaggle_auth(account):
     Returns a requests auth tuple or headers dict for the Kaggle REST API.
     Works with BOTH Legacy credentials AND new KGAT_ tokens.
 
-    Auto-detection logic:
-      - If key starts with "KGAT_" → use as Bearer token (new API token)
-      - Else → use as Basic auth (username, key) — Legacy API key
+    Auto-detection logic (lenient — handles whitespace, case, Bearer prefix):
+      - If key (after stripping) starts with "KGAT_" (case-insensitive) → Bearer token
+      - Else → Basic auth (username, key) — Legacy API key
 
     Returns: (auth, headers) tuple
       - For Legacy: auth=(username, key), headers={}
       - For KGAT_ token: auth=None, headers={'Authorization': 'Bearer {token}'}
     """
     if account.get("auth_method") == "api_token":
-        token = account.get("api_token", "")
+        token = account.get("api_token", "").strip()
         # Strip any existing "Bearer " prefix to avoid duplication
-        if token.startswith("Bearer "):
+        if token.lower().startswith("bearer "):
             token = token[len("Bearer "):]
         return None, {'Authorization': f'Bearer {token}'}
     else:
         # Legacy mode — but check if the key is actually a KGAT_ token
-        # (some users store KGAT_ tokens in KAGGLE_KEY by mistake)
-        key = account.get("key", "")
-        if key.startswith("KGAT_"):
+        key = account.get("key", "").strip()
+        # Strip "Bearer " prefix if present
+        if key.lower().startswith("bearer "):
+            key = key[len("Bearer "):].strip()
+        # Case-insensitive check for KGAT_ prefix
+        if key.lower().startswith("kgat_"):
             # It's actually a KGAT_ token, use Bearer auth
             return None, {'Authorization': f'Bearer {key}'}
         else:
@@ -398,7 +401,8 @@ def check_kaggle_kernel_status(account):
         print(f"   ❌ فشل المصادقة لـ {username} (HTTP 401) — تحقق من الـ credentials في GitHub Secrets")
         return "unknown"
     if code == 403:
-        print(f"   ❌ محظور لـ {username} (HTTP 403)")
+        print(f"   ⚠️ محظور لـ {username} (HTTP 403) — الـ token صالح لكنه لا يملك صلاحيات kernels")
+        print(f"      → أعد إنشاء الـ token من kaggle.com/settings/api مع تحديد scopes: kernels.get kernels.update")
         return "unknown"
     if code in (-1, -2):
         print(f"   ⚠️ خطأ شبكة/اتصال لـ {username}")
@@ -825,7 +829,7 @@ def ensure_kaggle_cli():
 def push_kaggle_kernel_via_api(account, worker_code_path):
     """
     Pushes the kernel via the Kaggle REST API directly (POST /api/v1/kernels/push).
-    Uses multipart/form-data with the worker code as the file field.
+    Uses application/x-www-form-urlencoded with the code as a 'text' field.
 
     This bypasses kaggle CLI entirely — no auth issues, no env vars, no file paths.
 
@@ -839,9 +843,10 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
         # Inject the real username
         worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
 
-        # Build the multipart form data for POST /api/v1/kernels/push
-        # Required fields: id, title, language, kernel_type, is_private, enable_gpu, enable_internet
-        # Plus the code file as 'file'
+        # Build the form data for POST /api/v1/kernels/push
+        # The Kaggle API expects application/x-www-form-urlencoded with:
+        #   - text: the code content (NOT a file upload!)
+        #   - id, title, language, kernel_type, is_private, enable_gpu, enable_internet
         form_data = {
             "id": f"{username}/xandra-worker",
             "title": "xandra worker",        # kaggle converts to slug "xandra-worker"
@@ -850,17 +855,15 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             "is_private": "true",
             "enable_gpu": "true",
             "enable_internet": "true",
+            "text": worker_code,             # ← code as text field, not file upload
             "dataset_sources": "",
             "kernel_sources": "",
             "competition_sources": ""
         }
-        files = {
-            "file": ("xandra_worker.py", worker_code.encode('utf-8'), "text/plain")
-        }
 
-        # POST to the Kaggle REST API
+        # POST to the Kaggle REST API (no files — just form data)
         code, resp_data, resp_text = kaggle_api_post(
-            account, "kernels/push", data=form_data, files=files, timeout=120
+            account, "kernels/push", data=form_data, files=None, timeout=120
         )
 
         if code in (200, 201, 202):
@@ -871,7 +874,8 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             print(f"   Response: {resp_text[:300]}")
             return False
         elif code == 403:
-            print(f"❌ محظور لـ {username} (HTTP 403)")
+            print(f"❌ محظور لـ {username} (HTTP 403) — الـ token لا يملك صلاحيات kernels.update")
+            print(f"   → أعد إنشاء الـ token مع scope: kernels.update")
             print(f"   Response: {resp_text[:300]}")
             return False
         else:
