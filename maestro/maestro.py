@@ -924,7 +924,7 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             "title": "xandra worker",
             "text": worker_code,
             "language": "python",
-            "kernelType": "script",
+            "kernelType": "notebook",
             "isPrivate": True,
             "enableGpu": True,
             "enableInternet": True,
