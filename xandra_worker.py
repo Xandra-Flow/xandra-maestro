@@ -429,26 +429,51 @@ def load_checkpoint(model, timeout_seconds=180):
         # Capture trace for debugging
         import traceback
         log_step(traceback.format_exc())
-        print(f"🔄 البدء من الصفر (from scratch) — لا يوجد checkpoint")
-        return 0
+        print(f"🚫 فشل تحميل checkpoint — لن نبدأ من الصفر (سنخسر التقدم)")
+        # Re-raise so load_checkpoint_smart can handle it
+        raise
 
 
 def load_checkpoint_smart(model):
     """Smart checkpoint loading strategy:
     1. Try downloading latest.pt (with timeout)
-    2. If timeout or fails, start fresh from step 0
-    3. The training loop will save a fresh checkpoint after SAVE_EVERY steps
+    2. If timeout or fails, EXIT — DO NOT start from 0 (would lose 91k steps of progress!)
+    3. The maestro will retry later when HF CDN is faster.
     """
     try:
         return load_checkpoint(model, timeout_seconds=180)
     except Exception as e:
         print(f"⚠️ load_checkpoint failed completely: {e}")
-        return 0
+        print(f"🚫 لن نبدأ من الصفر — سنخسر تقدم 91,024 خطوة!")
+        # Write a signal file so the maestro can detect this failure mode
+        with open('CHECKPOINT_DOWNLOAD_FAILED.txt', 'w') as f:
+            f.write(f"Failed at {datetime.now(timezone.utc).isoformat()}: {e}\n")
+        # Exit with non-zero so Kaggle marks the run as failed
+        sys.exit(2)
 
 
 if not acquire_lock():
     print("\n⛔ لا يمكن التدريب الآن. جلسة أخرى قيد التشغيل.")
     sys.exit(0)
+
+# 🫀 Send "I'm alive" signal IMMEDIATELY after acquiring lock
+# This lets the maestro know the notebook booted successfully,
+# BEFORE we attempt the slow checkpoint download.
+try:
+    _alive_state = load_state()
+    _alive_state['notebook_status'] = {
+        'phase': 'booted',
+        'started_at': datetime.now(timezone.utc).isoformat(),
+        'message': 'Notebook container booted, preparing to load checkpoint'
+    }
+    _alive_state['training_lock']['last_heartbeat'] = datetime.now(timezone.utc).isoformat()
+    _alive_state['training_lock']['last_step'] = _alive_state.get('current_step', 0)
+    with open('state.json', 'w') as f: json.dump(_alive_state, f, indent=2, ensure_ascii=False)
+    upload_file(path_or_fileobj='state.json', path_in_repo='state.json',
+                repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+    log_step("✅ تم إرسال إشارة 'أنا حي' إلى state.json")
+except Exception as e:
+    log_step(f"⚠️ فشل إرسال إشارة 'أنا حي' (غير حرج): {e}")
 
 # ═══════════════════════════════════════════════════════════════
 # 🚀 CONTINUAL PRE-TRAINING — start from a pretrained model
