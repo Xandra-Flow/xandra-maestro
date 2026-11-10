@@ -268,58 +268,98 @@ def setup_kaggle_credentials(account):
         return False
 
 
+def get_kaggle_auth(account):
+    """
+    Returns a requests auth tuple or headers dict for the Kaggle REST API.
+    Works with BOTH Legacy credentials AND new KGAT_ tokens.
+
+    Returns: (auth, headers) tuple
+      - For Legacy: auth=(username, key), headers={}
+      - For KGAT_ token: auth=None, headers={'Authorization': 'Bearer {token}'}
+    """
+    if account.get("auth_method") == "api_token":
+        token = account.get("api_token", "")
+        return None, {'Authorization': f'Bearer {token}'}
+    else:
+        return (account["username"], account.get("key", "")), {}
+
+
+def kaggle_api_get(account, endpoint, params=None, timeout=30):
+    """
+    Makes a GET request to the Kaggle REST API.
+    Base URL: https://www.kaggle.com/api/v1/
+
+    Returns: (status_code, response_data) or (status_code, None) on parse error
+    """
+    auth, headers = get_kaggle_auth(account)
+    url = f"https://www.kaggle.com/api/v1/{endpoint.lstrip('/')}"
+    try:
+        resp = requests.get(url, auth=auth, headers=headers, params=params, timeout=timeout)
+        try:
+            data = resp.json()
+        except:
+            data = None
+        return resp.status_code, data
+    except requests.exceptions.Timeout:
+        return -1, None
+    except Exception as e:
+        print(f"   ⚠️ استثناء في API GET {endpoint}: {e}")
+        return -2, None
+
+
+def kaggle_api_post(account, endpoint, data=None, files=None, timeout=60):
+    """
+    Makes a POST request to the Kaggle REST API (for pushing kernels).
+    Uses multipart/form-data when files is provided.
+    """
+    auth, headers = get_kaggle_auth(account)
+    url = f"https://www.kaggle.com/api/v1/{endpoint.lstrip('/')}"
+    try:
+        if files:
+            resp = requests.post(url, auth=auth, headers=headers, data=data, files=files, timeout=timeout)
+        else:
+            resp = requests.post(url, auth=auth, headers=headers, json=data, timeout=timeout)
+        try:
+            resp_data = resp.json()
+        except:
+            resp_data = None
+        return resp.status_code, resp_data, resp.text
+    except requests.exceptions.Timeout:
+        return -1, None, "Timeout"
+    except Exception as e:
+        return -2, None, str(e)
+
+
 def verify_kaggle_auth(account):
     """
-    Verifies that kaggle CLI can actually authenticate with the given credentials.
-    Calls `kaggle competitions list` which requires auth — if it returns 401,
-    we know the credentials are wrong BEFORE we try to push.
-
-    Returns True if auth is working, False otherwise.
+    Verifies Kaggle credentials by calling the REST API directly.
+    Uses GET /api/v1/kernels/list?user={username} which requires valid auth.
     """
     username = account["username"]
-    subprocess_env = os.environ.copy()
-    subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
-
-    # Pass the right env vars based on auth method
-    if account.get("auth_method") == "api_token":
-        subprocess_env['KAGGLE_API_TOKEN'] = account.get("api_token", "")
-        subprocess_env.pop('KAGGLE_USERNAME', None)
-        subprocess_env.pop('KAGGLE_KEY', None)
-    else:
-        subprocess_env['KAGGLE_USERNAME'] = username
-        subprocess_env['KAGGLE_KEY'] = account.get("key", "")
-        subprocess_env.pop('KAGGLE_API_TOKEN', None)
-
-    if 'KAGGLE_CONFIG_DIR' in os.environ:
-        subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
-
-    try:
-        # Use `kaggle competitions list` — requires auth, returns list or 401
-        result = subprocess.run(
-            ["kaggle", "competitions", "list"],
-            capture_output=True, text=True, timeout=20,
-            env=subprocess_env
-        )
-        out = (result.stdout + " " + result.stderr).lower()
-        if "401" in out or "unauthorized" in out or "authentication" in out:
-            print(f"   ❌ فشل المصادقة لـ {username} — تحقق من الـ token/key في GitHub Secrets")
-            return False
-        if result.returncode == 0:
-            return True
+    code, data = kaggle_api_get(account, "kernels/list", params={"user": username})
+    if code == 200:
+        return True
+    elif code == 401:
+        print(f"   ❌ فشل المصادقة لـ {username} (HTTP 401) — تحقق من الـ credentials")
         return False
-    except Exception as e:
-        print(f"   ⚠️ تعذّر التحقق من auth لـ {username}: {e}")
+    elif code == 403:
+        print(f"   ❌ محظور لـ {username} (HTTP 403) — تحقق من صلاحيات الـ token")
+        return False
+    elif code in (-1, -2):
+        print(f"   ⚠️ خطأ شبكة لـ {username}")
+        return False
+    else:
+        print(f"   ⚠️ استجابة غير متوقعة لـ {username}: HTTP {code}")
         return False
 
 
 def check_kaggle_kernel_status(account):
     """
-    Queries Kaggle for the real status of xandra-worker notebook via the kaggle CLI.
+    Queries Kaggle REST API directly for the status of xandra-worker notebook.
+    Uses GET /api/v1/kernels/status?user_name={username} which returns a list
+    of all kernels for the user with their current status.
 
-    KERNEL SLUG DISCOVERY (verified from actual Kaggle URLs):
-    Kaggle URL format: https://www.kaggle.com/code/{username}/{slug}
-    The user's actual notebooks live at: kaggle.com/code/{username}/xandra-worker
-    So the canonical slug is "xandra-worker" (with hyphen, NOT underscore).
+    This bypasses kaggle CLI entirely — no auth issues, no env vars, no file paths.
 
     Returns one of:
         'running'   → notebook is actively training
@@ -329,97 +369,56 @@ def check_kaggle_kernel_status(account):
         'not_found' → no notebook exists yet (fresh account)
         'unknown'   → could not determine (network/auth error)
     """
-    # Ensure CLI is available (installs if missing — also handles 'six' dep)
-    if not ensure_kaggle_cli():
-        return "unknown"
-
-    if not setup_kaggle_credentials(account):
-        return "unknown"
-
     username = account["username"]
-    # The canonical slug verified from real Kaggle URLs
-    possible_slugs = [
-        f"{username}/xandra-worker",      # ✅ CANONICAL — verified from actual URLs
-        f"{username}/xandraworker",       # alternate (no separator)
-        f"{username}/xandra_worker"       # alternate (underscore)
-    ]
 
-    auth_failed_count = 0
+    # Call the REST API directly
+    code, data = kaggle_api_get(
+        account,
+        "kernels/status",
+        params={"user_name": username}
+    )
 
-    # Build the env dict to pass to subprocess — pass the right env vars
-    # based on the account's auth method
-    subprocess_env = os.environ.copy()
-    subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
-
-    if account.get("auth_method") == "api_token":
-        # New API Token mode (KGAT_)
-        subprocess_env['KAGGLE_API_TOKEN'] = account.get("api_token", "")
-        subprocess_env.pop('KAGGLE_USERNAME', None)
-        subprocess_env.pop('KAGGLE_KEY', None)
-    else:
-        # Legacy mode
-        subprocess_env['KAGGLE_USERNAME'] = username
-        subprocess_env['KAGGLE_KEY'] = account.get("key", "")
-        subprocess_env.pop('KAGGLE_API_TOKEN', None)
-
-    # KAGGLE_CONFIG_DIR — if set, kaggle CLI reads kaggle.json/access_token from there
-    if 'KAGGLE_CONFIG_DIR' in os.environ:
-        subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
-
-    for slug in possible_slugs:
-        try:
-            result = subprocess.run(
-                ["kaggle", "kernels", "status", slug],
-                capture_output=True, text=True, timeout=30,
-                env=subprocess_env
-            )
-            out = (result.stdout + " " + result.stderr).lower()
-
-            # ⚠️ Detect auth failures FIRST
-            if ("authentication required" in out or
-                "you will need a kaggle account" in out or
-                "kaggle auth login" in out or
-                "401" in out or
-                "unauthorized" in out):
-                print(f"   ⚠️ فشل المصادقة لـ {username} — تحقق من KAGGLE_KEY")
-                auth_failed_count += 1
-                continue
-
-            # If kernel not found, try the next slug
-            if "no kernels found" in out or "not found" in out or "404" in out:
-                continue
-
-            # Found a real status
-            if "running" in out or "in queue" in out:
-                return "running"
-            if "complete" in out:
-                return "complete"
-            if "error" in out or "failed" in out:
-                return "error"
-            if "cancel" in out:
-                return "canceled"
-
-            # CLI returned something but ambiguous — check return code
-            if result.returncode == 0:
-                if not result.stdout.strip():
-                    return "unknown"
-                print(f"   📝 raw output for {slug}: {result.stdout[:200]}")
-                return "unknown"
-            else:
-                continue
-        except subprocess.TimeoutExpired:
-            print(f"⏱️ انتهت مهلة الاستعلام عن {slug}")
-            return "unknown"
-        except Exception as e:
-            print(f"⚠️ خطأ في فحص حالة الـ kernel لـ {username}: {e}")
-            return "unknown"
-
-    # If auth failed for any slug, return "unknown" (NOT "not_found")
-    if auth_failed_count > 0:
-        print(f"   ⚠️ فشل المصادقة على {auth_failed_count} محاولة لـ {username} — إرجاع unknown")
+    # Handle auth failures
+    if code == 401:
+        print(f"   ❌ فشل المصادقة لـ {username} (HTTP 401) — تحقق من الـ credentials في GitHub Secrets")
+        return "unknown"
+    if code == 403:
+        print(f"   ❌ محظور لـ {username} (HTTP 403)")
+        return "unknown"
+    if code in (-1, -2):
+        print(f"   ⚠️ خطأ شبكة/اتصال لـ {username}")
+        return "unknown"
+    if code != 200 or not data:
+        print(f"   ⚠️ استجابة غير متوقعة لـ {username}: HTTP {code}")
         return "unknown"
 
-    # All slugs returned "not found" — this is genuinely a fresh account (no kernel)
+    # Parse the response — looking for our xandra-worker kernel
+    # The response format is: {"status": [{"id": "...", "status": "...", ...}, ...]}
+    # or sometimes just a list
+    kernels = data if isinstance(data, list) else data.get("status", data.get("kernels", []))
+    if not isinstance(kernels, list):
+        kernels = []
+
+    # Look for our kernel by slug/ref/title
+    target_slugs = ["xandra-worker", "xandraworker", "xandra_worker"]
+    for k in kernels:
+        ref = (k.get("ref") or k.get("slug") or k.get("title") or "").lower()
+        # Check if this kernel matches one of our target slugs
+        if any(s in ref for s in target_slugs):
+            status = (k.get("status") or k.get("state") or "").lower()
+            if status in ("running", "runinprogress", "in_progress", "inprogress", "queued", "in queue"):
+                return "running"
+            if status in ("complete", "finished", "success", "done"):
+                return "complete"
+            if status in ("error", "failed", "failure"):
+                return "error"
+            if status in ("cancelled", "canceled"):
+                return "canceled"
+            # Found our kernel but status is unrecognized
+            print(f"   📝 حالة غير معروفة لـ {username}: {status}")
+            return "unknown"
+
+    # No matching kernel found — this is a fresh account
     return "not_found"
 
 
@@ -797,96 +796,60 @@ def ensure_kaggle_cli():
 
 def push_kaggle_kernel_via_api(account, worker_code_path):
     """
-    Pushes the kernel via the kaggle CLI (the official method).
+    Pushes the kernel via the Kaggle REST API directly (POST /api/v1/kernels/push).
+    Uses multipart/form-data with the worker code as the file field.
 
-    KERNEL SLUG RULES (verified from actual Kaggle URLs):
-    - Kaggle URL format: kaggle.com/code/{username}/{slug}
-    - Slug is auto-generated from title by:
-        * Converting spaces to hyphens
-        * Converting underscores to hyphens
-        * Lowercasing
-        * Removing other special chars
-    - User's existing notebooks live at: kaggle.com/code/{username}/xandra-worker
-    - So title must be "xandra worker" (with space) or "xandra-worker" (with hyphen)
-      → slug becomes "xandra-worker"
-    - And id must be "{username}/xandra-worker" (matching the slug)
+    This bypasses kaggle CLI entirely — no auth issues, no env vars, no file paths.
 
     Returns True on success.
     """
-    if not ensure_kaggle_cli():
-        return False
-
-    if not setup_kaggle_credentials(account):
-        return False
-
     username = account["username"]
     try:
-        # Inject the real username into the worker code before pushing
+        # Read the worker code
         with open(worker_code_path, "r") as f:
             worker_code = f.read()
+        # Inject the real username
         worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
-        with open(worker_code_path, "w") as f:
-            f.write(worker_code)
 
-        # Create kernel-metadata.json (required by kaggle kernels push)
-        # Use title="xandra worker" → kaggle converts to slug "xandra-worker"
-        # which matches the canonical URL kaggle.com/code/{username}/xandra-worker
-        #
-        # ⚠️ IMPORTANT: is_private/enable_gpu/enable_internet must be boolean true,
-        # NOT string "true" — kaggle CLI 1.6.17 rejects string values
-        # (per https://github.com/Kaggle/kaggle-cli/issues/821)
-        metadata = {
+        # Build the multipart form data for POST /api/v1/kernels/push
+        # Required fields: id, title, language, kernel_type, is_private, enable_gpu, enable_internet
+        # Plus the code file as 'file'
+        form_data = {
             "id": f"{username}/xandra-worker",
-            "title": "xandra worker",
-            "code_file": "xandra_worker.py",
+            "title": "xandra worker",        # kaggle converts to slug "xandra-worker"
             "language": "python",
             "kernel_type": "script",
-            "is_private": True,
-            "enable_gpu": True,
-            "enable_internet": True,
-            "dataset_sources": [],
-            "kernel_sources": [],
-            "competition_sources": []
+            "is_private": "true",
+            "enable_gpu": "true",
+            "enable_internet": "true",
+            "dataset_sources": "",
+            "kernel_sources": "",
+            "competition_sources": ""
         }
-        with open("kernel-metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
+        files = {
+            "file": ("xandra_worker.py", worker_code.encode('utf-8'), "text/plain")
+        }
 
-        # Push using the official CLI
-        # Pass explicit env vars based on the account's auth method
-        subprocess_env = os.environ.copy()
-        subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
-
-        if account.get("auth_method") == "api_token":
-            subprocess_env['KAGGLE_API_TOKEN'] = account.get("api_token", "")
-            subprocess_env.pop('KAGGLE_USERNAME', None)
-            subprocess_env.pop('KAGGLE_KEY', None)
-        else:
-            subprocess_env['KAGGLE_USERNAME'] = username
-            subprocess_env['KAGGLE_KEY'] = account.get("key", "")
-            subprocess_env.pop('KAGGLE_API_TOKEN', None)
-
-        if 'KAGGLE_CONFIG_DIR' in os.environ:
-            subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
-
-        result = subprocess.run(
-            ["kaggle", "kernels", "push", "-p", "."],
-            capture_output=True, text=True, timeout=120,
-            env=subprocess_env
+        # POST to the Kaggle REST API
+        code, resp_data, resp_text = kaggle_api_post(
+            account, "kernels/push", data=form_data, files=files, timeout=120
         )
 
-        if result.returncode == 0:
+        if code in (200, 201, 202):
             print(f"✅ تم رفع الـ Notebook على {username} (slug: xandra-worker)")
             return True
-        else:
-            stderr = result.stderr or ""
-            stdout = result.stdout or ""
-            print(f"❌ فشل الرفع عبر CLI (exit {result.returncode})")
-            print(f"   stdout: {stdout[:400]}")
-            print(f"   stderr: {stderr[:400]}")
+        elif code == 401:
+            print(f"❌ فشل المصادقة لـ {username} (HTTP 401) — تحقق من الـ credentials")
+            print(f"   Response: {resp_text[:300]}")
             return False
-    except subprocess.TimeoutExpired:
-        print(f"⏱️ انتهت مهلة رفع الـ Notebook على {username}")
-        return False
+        elif code == 403:
+            print(f"❌ محظور لـ {username} (HTTP 403)")
+            print(f"   Response: {resp_text[:300]}")
+            return False
+        else:
+            print(f"❌ فشل الرفع (HTTP {code})")
+            print(f"   Response: {resp_text[:400]}")
+            return False
     except Exception as e:
         print(f"❌ استثناء أثناء الرفع: {e}")
         return False
