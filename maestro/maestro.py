@@ -764,8 +764,24 @@ def select_available_account(state):
     #   1. Most remaining hours (primary)
     #   2. Least-recently-used (tiebreaker — distributes load)
     #   3. Fewest total sessions (final tiebreaker)
+    #   4. Random tiebreaker (when all above are equal, pick randomly)
     candidates = [a for a in account_stats if a["excluded_reason"] is None]
-    # Sort by: most remaining DESC, then oldest last_session ASC, then fewest sessions ASC
+
+    # First, try to find accounts that have NEVER been used (sessions=0 and no last_session_time)
+    # These should be prioritized to distribute load
+    never_used = [a for a in candidates if a["sessions"] == 0 and a["last_session_time"] is None]
+    used_accounts = [a for a in candidates if a not in never_used]
+
+    # If there are accounts that have never been used, pick randomly from them
+    # This ensures we don't always pick the first account
+    if never_used:
+        import random
+        best = random.choice(never_used)
+        for acc in KAGGLE_ACCOUNTS:
+            if acc["username"] == best["username"]:
+                return acc, best["remaining"], account_stats
+
+    # Otherwise, sort by: most remaining DESC, then oldest last_session ASC, then fewest sessions ASC
     candidates.sort(key=lambda x: (
         -x["remaining"],                          # 1) most remaining first
         x["last_session_time"] or "0000",         # 2) least-recently-used first
