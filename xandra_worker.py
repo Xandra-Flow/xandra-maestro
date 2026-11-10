@@ -390,22 +390,61 @@ if not acquire_lock():
     print("\n⛔ لا يمكن التدريب الآن. جلسة أخرى قيد التشغيل.")
     sys.exit(0)
 
-# 🆕 Initialize the modern model
-model = XandraModern().to(device)
+# ═══════════════════════════════════════════════════════════════
+# 🚀 CONTINUAL PRE-TRAINING — start from a pretrained model
+# This is the BIGGEST speedup: instead of training from scratch,
+# we start from Qwen2.5-0.5B (already trained on 100B+ tokens)
+# and continue training on our Arabic data. Saves MONTHS of training.
+# ═══════════════════════════════════════════════════════════════
+USE_CONTINUAL_PRETRAINING = True   # 🚀 Start from pretrained Qwen2.5-0.5B
+PRETRAINED_MODEL_NAME = "Qwen/Qwen2.5-0.5B"  # 500M params, already knows Arabic
+USE_8BIT_OPTIMIZER = True          # 🚀 bitsandbytes 8-bit optimizer (saves 75% VRAM)
+USE_DATA_DEDUP = True              # 🚀 Remove duplicate texts from training data
+USE_LORA = False                   # 🆕 LoRA fine-tuning (set to True to use)
 
-# 📊 Print model stats
-n_params = sum(p.numel() for p in model.parameters())
-print(f"\n🧠 Model: XandraModern (LLaMA-style architecture)")
-print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
-print(f"   Layers: {N_LAYERS} | Dim: {MODEL_DIM} | Heads: {N_HEADS} (Q) / {N_KV_HEADS} (KV)")
-print(f"   Max sequence length: {MAX_LEN}")
-print(f"   RoPE: ✅ | RMSNorm: ✅ | GQA: ✅ | SwiGLU: ✅ | Weight tying: ✅")
+if USE_CONTINUAL_PRETRAINING:
+    print(f"\n🚀 CONTINUAL PRE-TRAINING: Loading pretrained {PRETRAINED_MODEL_NAME}")
+    print(f"   This saves MONTHS of training — model already knows Arabic from pretraining")
 
-state = load_state()
-last_step = load_checkpoint(model)
+    from transformers import AutoModelForCausalLM
+    # Load pretrained model with bfloat16 to save VRAM
+    model = AutoModelForCausalLM.from_pretrained(
+        PRETRAINED_MODEL_NAME,
+        torch_dtype=torch.bfloat16 if USE_MIXED_PRECISION else torch.float32,
+        attn_implementation="sdpa",  # Use scaled_dot_product_attention
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
+    ).to(device)
 
-from transformers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
+    # Get the actual model params
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"✅ Loaded {PRETRAINED_MODEL_NAME}")
+    print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
+    print(f"   Architecture: pretrained (continual pre-training)")
+
+    # Use the pretrained tokenizer (matches the model's vocab)
+    tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL_NAME, use_fast=True, trust_remote_code=True)
+
+    # Load our checkpoint if it exists (continual pre-training on top of pretrained)
+    state = load_state()
+    last_step = load_checkpoint(model)
+    if last_step == 0:
+        print(f"   Starting continual pre-training from pretrained weights (step 0)")
+    else:
+        print(f"   Resuming from step {last_step:,}")
+
+else:
+    # Train from scratch (original path)
+    model = XandraModern().to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"\n🧠 Model: XandraModern (training from scratch)")
+    print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
+
+    state = load_state()
+    last_step = load_checkpoint(model)
+
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
 # ═══════════════════════════════════════════════════════════════
 # 📖 Data Loading (preserved)
@@ -521,7 +560,55 @@ class BatchPrefetcher:
 
 
 # Initialize training
-optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+# 🚀 DATA DEDUPLICATION — remove duplicate texts for better learning
+if USE_DATA_DEDUP and all_texts:
+    original_count = len(all_texts)
+    seen = set()
+    unique_texts = []
+    for text in all_texts:
+        key = text[:100].strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique_texts.append(text)
+    all_texts = unique_texts
+    dedup_pct = (1 - len(all_texts) / original_count) * 100 if original_count > 0 else 0
+    print(f"🚀 Data deduplication: removed {original_count - len(all_texts)} duplicates ({dedup_pct:.1f}% reduction)")
+    print(f"   {len(all_texts):,} unique texts remaining")
+
+# 🆕 LoRA Fine-tuning (optional — set USE_LORA = True to enable)
+if USE_LORA:
+    try:
+        from peft import LoraConfig, get_peft_model, TaskType
+        lora_config = LoraConfig(
+            r=16,  # LoRA rank
+            lora_alpha=32,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+        print(f"🆕 LoRA: ✅ enabled (only ~1% of params are trainable)")
+    except ImportError:
+        print("⚠️ peft library not installed — skipping LoRA")
+        USE_LORA = False
+
+# 🚀 8-bit Optimizer (saves 75% VRAM for optimizer states)
+if USE_8BIT_OPTIMIZER:
+    try:
+        install('bitsandbytes')
+        import bitsandbytes as bnb
+        optimizer = bnb.optim.AdamW8bit(
+            model.parameters(), lr=LEARNING_RATE, weight_decay=0.01
+        )
+        print(f"🚀 8-bit Optimizer: ✅ enabled (saves ~75% VRAM)")
+    except Exception as e:
+        print(f"⚠️ 8-bit optimizer failed: {e} — falling back to standard AdamW")
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+else:
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_STEPS)
 
 # 🚀 Mixed Precision
