@@ -55,6 +55,7 @@ jobs:
           KAGGLE_API_TOKEN_3: ${{ secrets.KAGGLE_API_TOKEN_3 }}
           KAGGLE_API_TOKEN_4: ${{ secrets.KAGGLE_API_TOKEN_4 }}
           KAGGLE_API_TOKEN_5: ${{ secrets.KAGGLE_API_TOKEN_5 }}
+          KAGGLE_API_TOKEN_6: ${{ secrets.KAGGLE_API_TOKEN_6 }}
           # 🔑 Legacy credentials (optional — used as fallback / for username display)
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
@@ -66,6 +67,8 @@ jobs:
           KAGGLE_KEY_4: ${{ secrets.KAGGLE_KEY_4 }}
           KAGGLE_USERNAME_5: ${{ secrets.KAGGLE_USERNAME_5 }}
           KAGGLE_KEY_5: ${{ secrets.KAGGLE_KEY_5 }}
+          KAGGLE_USERNAME_6: ${{ secrets.KAGGLE_USERNAME_6 }}
+          KAGGLE_KEY_6: ${{ secrets.KAGGLE_KEY_6 }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}

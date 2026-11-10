@@ -421,9 +421,12 @@ def check_kaggle_kernel_status(account):
         print(f"   ❌ فشل المصادقة لـ {username} (HTTP 401) — تحقق من الـ credentials في GitHub Secrets")
         return "unknown"
     if code == 403:
-        print(f"   ⚠️ محظور لـ {username} (HTTP 403) — الـ token صالح لكنه لا يملك صلاحيات kernels")
-        print(f"      → أعد إنشاء الـ token من kaggle.com/settings/api مع تحديد scopes: kernels.get kernels.update")
-        return "unknown"
+        # 403 on kernels/status endpoint is common — it often means the endpoint
+        # is restricted even with valid tokens. We treat this as "uncertain" rather
+        # than blocking the account. The actual kernel push will work fine.
+        # We use the lock state in state.json as the source of truth instead.
+        print(f"   ℹ️ {username}: kernels/status رجع 403 (endpoint محدود) — سيُستخدم حالة القفل من state.json")
+        return "unknown_via_lock"
     if code in (-1, -2):
         print(f"   ⚠️ خطأ شبكة/اتصال لـ {username}")
         return "unknown"
@@ -1036,7 +1039,35 @@ def main():
         state = release_lock(state, reason="launch_failed")
         update_state(state)
     else:
+        # 📧 Send SUCCESS email with a brief report
+        current_step = state.get('current_step', 0)
+        target_steps = state.get('target_steps', 500000)
+        progress_pct = (current_step / target_steps * 100) if target_steps > 0 else 0
+        current_loss = state.get('current_loss', 'N/A')
+        gpu_hours = state.get('gpu_hours_used', 0)
+        total_sessions = len(state.get('history', []))
+
+        success_body = f"""
+<div dir="rtl" style="font-family:Arial;direction:rtl;text-align:right">
+<h2 style="color:#48bb78">✅ تم إطلاق جلسة تدريب جديدة بنجاح!</h2>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">👤 الحساب</td><td style="padding:8px;border:1px solid #ddd"><strong>{account['username']}</strong></td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">⏱️ الساعات المتبقية</td><td style="padding:8px;border:1px solid #ddd">{remaining_hours:.1f}h / 30h</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📊 الخطوة الحالية</td><td style="padding:8px;border:1px solid #ddd">{current_step:,} / {target_steps:,} ({progress_pct:.1f}%)</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📉 الخسارة الحالية</td><td style="padding:8px;border:1px solid #ddd">{current_loss}</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">⏰ إجمالي ساعات GPU</td><td style="padding:8px;border:1px solid #ddd">{gpu_hours:.1f}h</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">📦 إجمالي الجلسات</td><td style="padding:8px;border:1px solid #ddd">{total_sessions}</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">🌐 slug</td><td style="padding:8px;border:1px solid #ddd">{account['username']}/xandra-worker</td></tr>
+<tr><td style="padding:8px;border:1px solid #ddd;background:#f0fff4">⏰ الوقت</td><td style="padding:8px;border:1px solid #ddd">{datetime.now(timezone.utc).isoformat()}</td></tr>
+</table>
+<p style="margin-top:15px;color:#666">رابط الـ Notebook: <a href="https://www.kaggle.com/code/{account['username']}/xandra-worker">kaggle.com/code/{account['username']}/xandra-worker</a></p>
+<p style="color:#666">الجولة القادمة من المايسترو ستكون بعد ساعة للتحقق من التقدم.</p>
+</div>
+"""
+        send_email(f"✅ بدء تدريب جديد على {account['username']} (خطوة {current_step:,})",
+                   success_body)
         print(f"\n✅ تم بنجاح. المايسترو سينام حتى الجولة القادمة.")
+        print(f"📧 تم إرسال تقرير النجاح إلى {EMAIL_TO}")
 
 
 if __name__ == "__main__":
