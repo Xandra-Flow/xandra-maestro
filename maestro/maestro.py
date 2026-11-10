@@ -36,12 +36,71 @@ GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_PASS = os.environ.get("GMAIL_PASS")
 EMAIL_TO = os.environ.get("EMAIL_TO", GMAIL_USER)
 
+# ═══════════════════════════════════════════════════════════════
+# 📚 Account Loading — supports BOTH Legacy and New API tokens
+# ═══════════════════════════════════════════════════════════════
+#
+# Kaggle supports TWO authentication methods:
+#
+# 1. Legacy API Key (kaggle.json format):
+#    - GitHub Secrets: KAGGLE_USERNAME + KAGGLE_KEY (for account 1)
+#                     KAGGLE_USERNAME_N + KAGGLE_KEY_N (for accounts 2-6)
+#    - Value format: KAGGLE_KEY is 32-char hex string (e.g., "a1b2c3d4e5f6...")
+#
+# 2. New API Token (KGAT_ format — RECOMMENDED for kaggle CLI 2.x):
+#    - GitHub Secrets: KAGGLE_API_TOKEN (for account 1)
+#                     KAGGLE_API_TOKEN_N (for accounts 2-6)
+#    - Value format: KGAT_xxxxxxxxxxxxxxxxxxxxxxxx
+#    - Used via KAGGLE_API_TOKEN env var OR ~/.kaggle/access_token file
+#
+# We load accounts using EITHER method. If both are set, the new token wins
+# (because it's the official future-proof method).
+
 KAGGLE_ACCOUNTS = []
 for i in range(1, 7):
-    username = os.environ.get(f"KAGGLE_USERNAME_{i}" if i > 1 else "KAGGLE_USERNAME")
-    key = os.environ.get(f"KAGGLE_KEY_{i}" if i > 1 else "KAGGLE_KEY")
-    if username and key:
-        KAGGLE_ACCOUNTS.append({"username": username, "key": key, "index": i, "status": "active"})
+    suffix = "" if i == 1 else f"_{i}"
+
+    # Method 1: New API Token (preferred)
+    api_token = os.environ.get(f"KAGGLE_API_TOKEN{suffix}")
+
+    # Method 2: Legacy API Key
+    username_legacy = os.environ.get(f"KAGGLE_USERNAME{suffix}")
+    key_legacy = os.environ.get(f"KAGGLE_KEY{suffix}")
+
+    if api_token:
+        # New API Token mode — username is optional, kaggle CLI 2.x figures it out
+        # But we still need a username for kernel_id like "smartforce/xandra-worker"
+        # Try to read it from KAGGLE_USERNAME if available, else use a placeholder
+        # that will be filled in later when we query the API
+        username = username_legacy or f"account_{i}"  # fallback
+        KAGGLE_ACCOUNTS.append({
+            "username": username,
+            "api_token": api_token,      # KGAT_xxx
+            "key": None,                  # no legacy key
+            "auth_method": "api_token",
+            "index": i,
+            "status": "active"
+        })
+    elif username_legacy and key_legacy:
+        # Legacy API Key mode
+        KAGGLE_ACCOUNTS.append({
+            "username": username_legacy,
+            "api_token": None,
+            "key": key_legacy,
+            "auth_method": "legacy",
+            "index": i,
+            "status": "active"
+        })
+
+# Log how many accounts were loaded and via which method
+if KAGGLE_ACCOUNTS:
+    token_count = sum(1 for a in KAGGLE_ACCOUNTS if a["auth_method"] == "api_token")
+    legacy_count = sum(1 for a in KAGGLE_ACCOUNTS if a["auth_method"] == "legacy")
+    print(f"📚 تم تحميل {len(KAGGLE_ACCOUNTS)} حسابات ({token_count} بالـ Token الجديد + {legacy_count} بالـ Legacy)")
+else:
+    print("⚠️ لم يتم تحميل أي حسابات! تحقق من GitHub Secrets:")
+    print("   - إما KAGGLE_API_TOKEN (1-6) للـ Token الجديد")
+    print("   - أو KAGGLE_USERNAME/KAGGLE_KEY (1-6) للـ Legacy")
 
 WEEKLY_GPU_LIMIT_PER_ACCOUNT = 30
 LOCK_TIMEOUT_HOURS = 12          # safety net only; real status checked each cycle
@@ -71,90 +130,148 @@ def send_email(subject, body):
 
 def get_kaggle_config_dir():
     """
-    Returns a writable directory for kaggle.json (works on GitHub Actions, Kaggle, local).
-    kaggle CLI 1.6.17 reads kaggle.json from $HOME/.kaggle/ — but in GitHub Actions,
-    HOME is set to a temp dir per step, so we must write kaggle.json to the
-    ACTUAL home dir AND verify it's readable by the CLI.
+    Returns a writable directory for kaggle.json that kaggle CLI will ACTUALLY read.
 
-    Strategy:
-    1. Get $HOME (GitHub Actions sets this to /home/runner)
-    2. Create $HOME/.kaggle/ if needed
-    3. Write kaggle.json there
-    4. If that fails, fall back to a temp dir + set KAGGLE_CONFIG_DIR env var
+    Per Kaggle CLI official docs (https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md):
+    Kaggle CLI reads credentials in this priority order:
+      1. `kaggle auth login` (OAuth — requires browser, not for CI)
+      2. KAGGLE_API_TOKEN env var (new in 2.x — requires new token format)
+      3. ~/.kaggle/access_token (new file format)
+      4. ~/.kaggle/kaggle.json (Legacy — STILL SUPPORTED, works in both 1.x and 2.x)
+
+    For maximum compatibility (works with kaggle CLI 1.6.17 AND 2.x), we use:
+      - KAGGLE_CONFIG_DIR env var → explicitly tells kaggle CLI where to find kaggle.json
+      - Writes kaggle.json to that directory
+
+    KAGGLE_CONFIG_DIR is supported by BOTH kaggle CLI 1.x and 2.x.
     """
     import tempfile
 
-    # GitHub Actions: HOME=/home/runner — writable
-    # Local dev: HOME=/home/user — writable
-    # Kaggle: HOME=/root — writable
+    # Strategy: use a deterministic, writable directory + set KAGGLE_CONFIG_DIR
+    # so kaggle CLI knows exactly where to look
     home = os.environ.get('HOME') or os.path.expanduser('~')
     kaggle_dir = os.path.join(home, '.kaggle')
 
     try:
         os.makedirs(kaggle_dir, exist_ok=True)
-        # Test write access by creating a test file
         test_file = os.path.join(kaggle_dir, '.write_test')
         with open(test_file, 'w') as f: f.write('ok')
         os.remove(test_file)
-        return kaggle_dir
     except (PermissionError, OSError) as e:
         print(f"⚠️ لا يمكن الكتابة في {kaggle_dir}: {e} — استخدام temp dir")
         kaggle_dir = os.path.join(tempfile.gettempdir(), 'kaggle_config')
         os.makedirs(kaggle_dir, exist_ok=True)
-        # Set KAGGLE_CONFIG_DIR — kaggle CLI 1.6.17 respects this env var
-        os.environ['KAGGLE_CONFIG_DIR'] = kaggle_dir
-        return kaggle_dir
+
+    # ALWAYS set KAGGLE_CONFIG_DIR — this is the key!
+    # kaggle CLI checks this env var BEFORE checking ~/.kaggle/
+    os.environ['KAGGLE_CONFIG_DIR'] = kaggle_dir
+    return kaggle_dir
 
 
 def setup_kaggle_credentials(account):
     """
-    Configures Kaggle credentials for a specific account using ALL methods:
-      1. Writes $HOME/.kaggle/kaggle.json (REQUIRED by kaggle CLI 1.6.17)
-      2. Sets KAGGLE_USERNAME and KAGGLE_KEY env vars (some commands use them)
-      3. Sets KAGGLE_CONFIG_DIR env var if HOME is not writable
-      4. Verifies the file is actually readable before returning True
+    Configures Kaggle credentials based on the account's auth_method.
+
+    For "api_token" mode (KGAT_ tokens — kaggle CLI 2.x):
+      - Writes the token to ~/.kaggle/access_token (official file location)
+      - Also sets KAGGLE_API_TOKEN env var (alternative method)
+      - Passes it to all subprocess calls via env dict
+
+    For "legacy" mode (kaggle.json — kaggle CLI 1.6.17 + 2.x):
+      - Writes ~/.kaggle/kaggle.json with {"username": "...", "key": "..."}
+      - Sets KAGGLE_USERNAME + KAGGLE_KEY env vars
+      - Passes them to all subprocess calls via env dict
+
+    Both methods set KAGGLE_CONFIG_DIR to ensure the kaggle CLI reads from
+    the correct location regardless of HOME.
     """
     try:
-        username = account["username"]
-        key = account["key"]
-
-        # Method 1: env vars (some commands/checks use these)
-        os.environ['KAGGLE_USERNAME'] = username
-        os.environ['KAGGLE_KEY'] = key
-
-        # Method 2: write kaggle.json to the directory kaggle CLI will read from
+        # Get the kaggle config dir (sets KAGGLE_CONFIG_DIR env var as side effect)
         kaggle_dir = get_kaggle_config_dir()
-        kaggle_json_path = os.path.join(kaggle_dir, 'kaggle.json')
-        with open(kaggle_json_path, 'w') as f:
-            json.dump({"username": username, "key": key}, f)
-        os.chmod(kaggle_json_path, 0o600)
 
-        # Verify the file was actually written and is readable
-        if not os.path.exists(kaggle_json_path):
-            print(f"❌ فشل كتابة kaggle.json في {kaggle_json_path}")
-            return False
-
-        # Read back to verify contents
-        try:
-            with open(kaggle_json_path, 'r') as f:
-                data = json.load(f)
-            if data.get('username') != username or data.get('key') != key:
-                print(f"❌ kaggle.json يحتوي على بيانات خاطئة")
+        if account.get("auth_method") == "api_token":
+            # ─── New API Token mode ─────────────────────────────────
+            api_token = account.get("api_token")
+            if not api_token:
+                print(f"❌ لا يوجد api_token لـ {account['username']}")
                 return False
-        except Exception as e:
-            print(f"❌ فشل قراءة kaggle.json للتحقق: {e}")
-            return False
 
-        return True
+            # Method 1: Write to ~/.kaggle/access_token (official file)
+            access_token_path = os.path.join(kaggle_dir, 'access_token')
+            with open(access_token_path, 'w') as f:
+                f.write(api_token)
+            os.chmod(access_token_path, 0o600)
+
+            # Method 2: Set KAGGLE_API_TOKEN env var (alternative)
+            os.environ['KAGGLE_API_TOKEN'] = api_token
+
+            # Clear any legacy kaggle.json to avoid conflict
+            legacy_json = os.path.join(kaggle_dir, 'kaggle.json')
+            if os.path.exists(legacy_json):
+                try: os.remove(legacy_json)
+                except: pass
+
+            # Verify the file was written
+            if not os.path.exists(access_token_path):
+                print(f"❌ فشل كتابة access_token في {access_token_path}")
+                return False
+
+            return True
+
+        else:
+            # ─── Legacy API Key mode ─────────────────────────────────
+            username = account["username"]
+            key = account["key"]
+            if not username or not key:
+                print(f"❌ بيانات اعتماد Legacy ناقصة لـ {account.get('username', '?')}")
+                return False
+
+            kaggle_json_path = os.path.join(kaggle_dir, 'kaggle.json')
+            with open(kaggle_json_path, 'w') as f:
+                json.dump({"username": username, "key": key}, f)
+            os.chmod(kaggle_json_path, 0o600)
+
+            # Verify the file was written
+            if not os.path.exists(kaggle_json_path):
+                print(f"❌ فشل كتابة kaggle.json في {kaggle_json_path}")
+                return False
+
+            # Read back to verify contents
+            try:
+                with open(kaggle_json_path, 'r') as f:
+                    data = json.load(f)
+                if data.get('username') != username or data.get('key') != key:
+                    print(f"❌ kaggle.json يحتوي على بيانات خاطئة")
+                    return False
+            except Exception as e:
+                print(f"❌ فشل قراءة kaggle.json للتحقق: {e}")
+                return False
+
+            # Set env vars (kaggle CLI 1.x uses them as fallback)
+            os.environ['KAGGLE_USERNAME'] = username
+            os.environ['KAGGLE_KEY'] = key
+
+            # Clear any access_token to avoid conflict
+            access_token_path = os.path.join(kaggle_dir, 'access_token')
+            if os.path.exists(access_token_path):
+                try: os.remove(access_token_path)
+                except: pass
+
+            # Clear KAGGLE_API_TOKEN (legacy mode doesn't use it)
+            if 'KAGGLE_API_TOKEN' in os.environ:
+                del os.environ['KAGGLE_API_TOKEN']
+
+            return True
+
     except Exception as e:
-        print(f"⚠️ فشل إعداد بيانات اعتماد Kaggle لـ {account['username']}: {e}")
+        print(f"⚠️ فشل إعداد بيانات اعتماد Kaggle لـ {account.get('username', '?')}: {e}")
         return False
 
 
 def verify_kaggle_auth(account):
     """
     Verifies that kaggle CLI can actually authenticate with the given credentials.
-    Calls `kaggle config view` which requires valid auth — if it returns 401,
+    Calls `kaggle competitions list` which requires auth — if it returns 401,
     we know the credentials are wrong BEFORE we try to push.
 
     Returns True if auth is working, False otherwise.
@@ -162,8 +279,17 @@ def verify_kaggle_auth(account):
     username = account["username"]
     subprocess_env = os.environ.copy()
     subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
-    subprocess_env['KAGGLE_USERNAME'] = username
-    subprocess_env['KAGGLE_KEY'] = account["key"]
+
+    # Pass the right env vars based on auth method
+    if account.get("auth_method") == "api_token":
+        subprocess_env['KAGGLE_API_TOKEN'] = account.get("api_token", "")
+        subprocess_env.pop('KAGGLE_USERNAME', None)
+        subprocess_env.pop('KAGGLE_KEY', None)
+    else:
+        subprocess_env['KAGGLE_USERNAME'] = username
+        subprocess_env['KAGGLE_KEY'] = account.get("key", "")
+        subprocess_env.pop('KAGGLE_API_TOKEN', None)
+
     if 'KAGGLE_CONFIG_DIR' in os.environ:
         subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
 
@@ -176,7 +302,7 @@ def verify_kaggle_auth(account):
         )
         out = (result.stdout + " " + result.stderr).lower()
         if "401" in out or "unauthorized" in out or "authentication" in out:
-            print(f"   ❌ فشل المصادقة لـ {username} — تحقق من KAGGLE_KEY في GitHub Secrets")
+            print(f"   ❌ فشل المصادقة لـ {username} — تحقق من الـ token/key في GitHub Secrets")
             return False
         if result.returncode == 0:
             return True
@@ -220,13 +346,23 @@ def check_kaggle_kernel_status(account):
 
     auth_failed_count = 0
 
-    # Build the env dict to pass to subprocess — explicitly include HOME and KAGGLE_*
-    # so the kaggle CLI inherits them correctly
+    # Build the env dict to pass to subprocess — pass the right env vars
+    # based on the account's auth method
     subprocess_env = os.environ.copy()
     subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
-    subprocess_env['KAGGLE_USERNAME'] = username
-    subprocess_env['KAGGLE_KEY'] = account["key"]
-    # KAGGLE_CONFIG_DIR — if set, kaggle CLI reads kaggle.json from there
+
+    if account.get("auth_method") == "api_token":
+        # New API Token mode (KGAT_)
+        subprocess_env['KAGGLE_API_TOKEN'] = account.get("api_token", "")
+        subprocess_env.pop('KAGGLE_USERNAME', None)
+        subprocess_env.pop('KAGGLE_KEY', None)
+    else:
+        # Legacy mode
+        subprocess_env['KAGGLE_USERNAME'] = username
+        subprocess_env['KAGGLE_KEY'] = account.get("key", "")
+        subprocess_env.pop('KAGGLE_API_TOKEN', None)
+
+    # KAGGLE_CONFIG_DIR — if set, kaggle CLI reads kaggle.json/access_token from there
     if 'KAGGLE_CONFIG_DIR' in os.environ:
         subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
 
@@ -410,13 +546,66 @@ def acquire_lock(state, account_name):
 # 🎯 Smart Account Selection (excludes accounts with running kernels)
 # ═══════════════════════════════════════════════════════════════
 
+def fetch_kaggle_username(account):
+    """
+    Fetches the actual Kaggle username for an account using its API token.
+    This is needed because KAGGLE_API_TOKEN alone doesn't tell us the username,
+    but we need it for kernel_id like "smartforce/xandra-worker".
+
+    Uses `kaggle config view` which shows the authenticated user's info.
+    """
+    if account.get("auth_method") != "api_token":
+        return account.get("username")
+
+    api_token = account.get("api_token", "")
+    if not api_token:
+        return account.get("username")
+
+    subprocess_env = os.environ.copy()
+    subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
+    subprocess_env['KAGGLE_API_TOKEN'] = api_token
+    subprocess_env.pop('KAGGLE_USERNAME', None)
+    subprocess_env.pop('KAGGLE_KEY', None)
+    if 'KAGGLE_CONFIG_DIR' in os.environ:
+        subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
+
+    try:
+        # `kaggle config view` shows the current user
+        result = subprocess.run(
+            ["kaggle", "config", "view"],
+            capture_output=True, text=True, timeout=20,
+            env=subprocess_env
+        )
+        out = result.stdout + " " + result.stderr
+        # Look for username in the output
+        # kaggle config view typically shows:
+        #   username: smartforce
+        #   ...
+        import re
+        m = re.search(r'username[:\s]+([a-zA-Z0-9_.\-]+)', out, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    except: pass
+    return account.get("username")
+
+
 def update_kernel_status_map(state):
     """
     Queries all Kaggle accounts for their kernel status and stores the result
     in state.kernel_status_map. This is what the Cloudflare Dashboard reads.
+
+    Also fetches the real username for accounts using KAGGLE_API_TOKEN
+    (since the token alone doesn't reveal the username).
     """
     kernel_map = {}
     for acc in KAGGLE_ACCOUNTS:
+        # Fetch real username for API token accounts (first time only)
+        if acc.get("auth_method") == "api_token" and acc.get("username", "").startswith("account_"):
+            real_username = fetch_kaggle_username(acc)
+            if real_username and not real_username.startswith("account_"):
+                acc["username"] = real_username
+                print(f"  ℹ️ تم استخراج اسم المستخدم: {real_username}")
+
         username = acc["username"]
         status = check_kaggle_kernel_status(acc)
         kernel_map[username] = {
@@ -553,47 +742,50 @@ def compute_session_gaps(state):
 def ensure_kaggle_cli():
     """
     Ensures the kaggle CLI is installed AND working.
-    Uses kaggle==1.6.17 specifically — the 1.x series reliably supports
-    KAGGLE_USERNAME + KAGGLE_KEY env vars (and ~/.kaggle/kaggle.json).
-    kaggle 2.x switched to OAuth-first which breaks our env-var-based auth.
+    Uses the LATEST kaggle CLI (2.x) because it supports KAGGLE_API_TOKEN
+    (the new KGAT_ tokens). kaggle CLI 1.6.17 does NOT support KAGGLE_API_TOKEN.
 
-    Also fixes the known issue where `pip install kaggle` doesn't install `six`
-    on Python 3.11+. We install `six` explicitly first, then kaggle==1.6.17.
+    If any account uses auth_method="api_token" (KGAT_), we MUST use 2.x.
+    If all accounts use legacy keys, 2.x still works (it supports kaggle.json legacy).
+
+    So we always install the latest 2.x version.
     """
     try:
-        # Test if kaggle CLI actually works (not just exists)
+        # Test if kaggle CLI is installed
         result = subprocess.run(
             ["kaggle", "--version"],
             capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
-            # Check version — if it's 2.x, downgrade to 1.6.17
-            version_out = (result.stdout + result.stderr).lower()
-            if version_out.startswith("kaggle cli 2") or "kaggle 2." in version_out:
-                print(f"⚠️ kaggle CLI 2.x مثبّت ({version_out.strip()}) — سيتم تخفيضه إلى 1.6.17")
-            else:
+            version_out = (result.stdout + result.stderr).strip()
+            # kaggle 2.x is what we want for KAGGLE_API_TOKEN support
+            if "2." in version_out or "kaggle cli 2" in version_out.lower():
                 return True
+            else:
+                print(f"📦 kaggle CLI قديم ({version_out}) — سيتم الترقية لأحدث إصدار (2.x)")
+                # Fall through to installation
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         pass
     except Exception:
         pass
 
-    # Install six first, then pin kaggle to 1.6.17 (the legacy reliable version)
-    print("📦 تثبيت kaggle CLI 1.6.17 (الإصدار المتوافق مع env vars)...")
+    # Install the LATEST kaggle CLI (2.x)
+    print("📦 تثبيت kaggle CLI (أحدث إصدار 2.x — يدعم KAGGLE_API_TOKEN)...")
     try:
+        # Install six first (still needed by some kaggle versions)
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "six"],
                        check=True, capture_output=True, timeout=60)
-        # Force-pin to 1.6.17 — this overrides any 2.x version
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall",
-                        "kaggle==1.6.17"],
-                       check=True, capture_output=True, timeout=120)
+        # Install latest kaggle (2.x)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "kaggle"],
+                       check=True, capture_output=True, timeout=180)
         # Verify
         result = subprocess.run(
             ["kaggle", "--version"],
             capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
-            print(f"✅ kaggle CLI 1.6.17 مثبّت بنجاح: {result.stdout.strip()}")
+            version_out = (result.stdout + result.stderr).strip()
+            print(f"✅ kaggle CLI مثبّت بنجاح: {version_out}")
             return True
         else:
             print(f"❌ kaggle CLI فشل بعد التثبيت: {result.stderr}")
@@ -639,15 +831,19 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
         # Create kernel-metadata.json (required by kaggle kernels push)
         # Use title="xandra worker" → kaggle converts to slug "xandra-worker"
         # which matches the canonical URL kaggle.com/code/{username}/xandra-worker
+        #
+        # ⚠️ IMPORTANT: is_private/enable_gpu/enable_internet must be boolean true,
+        # NOT string "true" — kaggle CLI 1.6.17 rejects string values
+        # (per https://github.com/Kaggle/kaggle-cli/issues/821)
         metadata = {
             "id": f"{username}/xandra-worker",
             "title": "xandra worker",
             "code_file": "xandra_worker.py",
             "language": "python",
             "kernel_type": "script",
-            "is_private": "true",
-            "enable_gpu": "true",
-            "enable_internet": "true",
+            "is_private": True,
+            "enable_gpu": True,
+            "enable_internet": True,
             "dataset_sources": [],
             "kernel_sources": [],
             "competition_sources": []
@@ -656,11 +852,19 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
             json.dump(metadata, f, indent=2)
 
         # Push using the official CLI
-        # Pass explicit env vars so kaggle CLI inherits credentials correctly
+        # Pass explicit env vars based on the account's auth method
         subprocess_env = os.environ.copy()
         subprocess_env['HOME'] = os.environ.get('HOME', os.path.expanduser('~'))
-        subprocess_env['KAGGLE_USERNAME'] = username
-        subprocess_env['KAGGLE_KEY'] = account["key"]
+
+        if account.get("auth_method") == "api_token":
+            subprocess_env['KAGGLE_API_TOKEN'] = account.get("api_token", "")
+            subprocess_env.pop('KAGGLE_USERNAME', None)
+            subprocess_env.pop('KAGGLE_KEY', None)
+        else:
+            subprocess_env['KAGGLE_USERNAME'] = username
+            subprocess_env['KAGGLE_KEY'] = account.get("key", "")
+            subprocess_env.pop('KAGGLE_API_TOKEN', None)
+
         if 'KAGGLE_CONFIG_DIR' in os.environ:
             subprocess_env['KAGGLE_CONFIG_DIR'] = os.environ['KAGGLE_CONFIG_DIR']
 

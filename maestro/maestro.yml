@@ -26,21 +26,36 @@ jobs:
           python-version: '3.11'
 
       - name: 📦 Install dependencies
-        # ملاحظة مهمة: نثبّت kaggle CLI 1.6.17 (NOT 2.x) لأن الإصدار 2.x
-        # يتطلب OAuth ولا يدعم KAGGLE_USERNAME/KAGGLE_KEY env vars بشكل افتراضي.
-        # الإصدار 1.6.17 يدعمها مباشرة — وهذا ما يحتاجه المايسترو.
-        # six مطلوب كاعتمادية لـ kaggle 1.6.x
+        # 🔑 نثبّت أحدث kaggle CLI (2.x) الذي يدعم KAGGLE_API_TOKEN (KGAT_ tokens)
+        #
+        # موثق من وثائق كاجل الرسمية:
+        # https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md
+        #
+        # kaggle CLI 2.x يدعم 4 طرق للمصادقة:
+        #   1. kaggle auth login (OAuth — متصفح، غير مناسب للـ CI)
+        #   2. KAGGLE_API_TOKEN env var (الجديد — KGAT_ tokens) ✅
+        #   3. ~/.kaggle/access_token (ملف)
+        #   4. ~/.kaggle/kaggle.json (Legacy — لا يزال مدعوماً)
+        #
+        # نستخدم KAGGLE_API_TOKEN لأن الـ tokens الجديدة تبدأ بـ KGAT_
         run: |
           pip install -q six
           pip install -q requests huggingface_hub pyyaml
-          pip install -q "kaggle==1.6.17"
-          # Verify kaggle CLI works (catches missing deps)
+          pip install -q --upgrade kaggle
+          # Verify kaggle CLI works
           kaggle --version || { echo "❌ kaggle CLI failed to install"; exit 1; }
 
       - name: 🎵 Run Maestro
         env:
           HF_REPO: ${{ secrets.HF_REPO }}
           HF_TOKEN_OWNER: ${{ secrets.HF_TOKEN_OWNER }}
+          # 🔑 New API Tokens (KGAT_ format) — from kaggle.com/settings/api
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_API_TOKEN_2: ${{ secrets.KAGGLE_API_TOKEN_2 }}
+          KAGGLE_API_TOKEN_3: ${{ secrets.KAGGLE_API_TOKEN_3 }}
+          KAGGLE_API_TOKEN_4: ${{ secrets.KAGGLE_API_TOKEN_4 }}
+          KAGGLE_API_TOKEN_5: ${{ secrets.KAGGLE_API_TOKEN_5 }}
+          # 🔑 Legacy credentials (optional — used as fallback / for username display)
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
           KAGGLE_USERNAME_2: ${{ secrets.KAGGLE_USERNAME_2 }}
