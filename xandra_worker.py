@@ -95,14 +95,14 @@ HEARTBEAT_EVERY_STEPS = 1000
 
 # 🚀 Training hyperparameters — OPTIMIZED
 MAX_STEPS = 1000000
-BATCH_SIZE = 48                # slightly smaller for bigger model
+BATCH_SIZE = 32                # safe for Kaggle GPU (was 48 — too big, caused OOM)
 MAX_LEN = 512                  # 🚀 2x longer context with RoPE!
 LEARNING_RATE = 3e-4
 SAVE_EVERY = 1000
 MAX_TIME_MINUTES = 650
 GRAD_ACCUM_STEPS = 4           # effective batch = 192
 USE_MIXED_PRECISION = True
-USE_TORCH_COMPILE = True
+USE_TORCH_COMPILE = False      # Disabled — can fail on Kaggle environment
 USE_GRADIENT_CHECKPOINTING = True   # 🆕 allows bigger model in limited VRAM
 PREFETCH_BATCHES = 2
 
@@ -396,11 +396,11 @@ if not acquire_lock():
 # we start from Qwen2.5-0.5B (already trained on 100B+ tokens)
 # and continue training on our Arabic data. Saves MONTHS of training.
 # ═══════════════════════════════════════════════════════════════
-USE_CONTINUAL_PRETRAINING = True   # 🚀 Start from pretrained Qwen2.5-0.5B
-PRETRAINED_MODEL_NAME = "Qwen/Qwen2.5-0.5B"  # 500M params, already knows Arabic
-USE_8BIT_OPTIMIZER = True          # 🚀 bitsandbytes 8-bit optimizer (saves 75% VRAM)
-USE_DATA_DEDUP = True              # 🚀 Remove duplicate texts from training data
-USE_LORA = False                   # 🆕 LoRA fine-tuning (set to True to use)
+USE_CONTINUAL_PRETRAINING = False  # Disabled — was causing failures on Kaggle
+PRETRAINED_MODEL_NAME = "Qwen/Qwen2.5-0.5B"
+USE_8BIT_OPTIMIZER = False         # Disabled — bitsandbytes fails on Kaggle
+USE_DATA_DEDUP = True              # Safe to keep
+USE_LORA = False                   # Disabled
 
 if USE_CONTINUAL_PRETRAINING:
     print(f"\n🚀 CONTINUAL PRE-TRAINING: Loading pretrained {PRETRAINED_MODEL_NAME}")
@@ -501,24 +501,83 @@ for source in sources_config["sources"]:
 
 if len(stream_datasets) > 0:
     combined_stream = interleave_datasets(stream_datasets, probabilities=stream_weights, seed=42)
-    stream_iter = iter(combined_stream)
     STREAMING_READY = True
 else:
     STREAMING_READY = False
 
+# Buffer to cache texts from streaming (avoids re-iterating exhausted streams)
+TEXT_BUFFER = []
+BUFFER_SIZE = 500  # cache 500 texts from the stream
+
+def refill_text_buffer():
+    """Refills the text buffer from the streaming dataset."""
+    global TEXT_BUFFER, stream_iter
+    if not STREAMING_READY:
+        return
+    try:
+        # Recreate iterator if exhausted
+        stream_iter = iter(combined_stream)
+        count = 0
+        for item in stream_iter:
+            if count >= BUFFER_SIZE:
+                break
+            text = item.get('text', item.get('content', item.get('nass', '')))
+            if text and len(str(text)) > 50:
+                TEXT_BUFFER.append(str(text))
+                count += 1
+        if count > 0:
+            print(f"📦 تم تعبئة الـ buffer بـ {count} نص من الـ stream")
+    except Exception as e:
+        print(f"⚠️ فشل تعبئة الـ buffer: {e}")
+
+# Initial fill
+if STREAMING_READY:
+    refill_text_buffer()
+
 
 def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
+    """Returns a tokenized batch. NEVER returns empty — has fallback."""
     texts = []
-    use_stream = STREAMING_READY and (len(all_texts) == 0 or torch.rand(1).item() < 0.3)
-    if use_stream:
-        for item in stream_iter:
-            if len(texts) >= batch_size: break
-            text = item.get('text', item.get('content', item.get('nass', '')))
-            if text and len(str(text)) > 50: texts.append(str(text))
-    if len(texts) < batch_size and len(all_texts) > 0:
-        indices = torch.randint(0, len(all_texts), (batch_size - len(texts),))
-        for idx in texts: texts.append(all_texts[idx])
 
+    # Method 1: Try streaming buffer first (70% of the time)
+    use_stream = STREAMING_READY and len(TEXT_BUFFER) > 0 and torch.rand(1).item() < 0.7
+    if use_stream:
+        # Pick random texts from the buffer
+        indices = torch.randint(0, len(TEXT_BUFFER), (batch_size,))
+        for idx in indices:
+            texts.append(TEXT_BUFFER[idx])
+
+    # Method 2: Fill remaining from local texts
+    if len(texts) < batch_size and len(all_texts) > 0:
+        needed = batch_size - len(texts)
+        indices = torch.randint(0, len(all_texts), (needed,))
+        for idx in indices:
+            texts.append(all_texts[idx])
+
+    # Method 3: Refill buffer if it's running low
+    if STREAMING_READY and len(TEXT_BUFFER) < 100:
+        refill_text_buffer()
+
+    # Method 4: Fallback — if NO texts available, generate simple training data
+    if len(texts) == 0:
+        print("⚠️ لا توجد بيانات! استخدام بيانات احتياطية...")
+        fallback_texts = [
+            "بسم الله الرحمن الرحيم",
+            "قال الله تعالى في كتابه الكريم",
+            "الحمد لله رب العالمين",
+            "إن الله مع الصابرين",
+            "وقل رب زدني علما",
+            "وفي ذلك فليتنافس المتنافسون",
+            "كل نفس ذائقة الموت",
+            "إنما يخشى الله من عباده العلماء",
+            "ومن يتق الله يجعل له مخرجا",
+            "إن مع العسر يسرا",
+        ]
+        indices = torch.randint(0, len(fallback_texts), (batch_size,))
+        for idx in indices:
+            texts.append(fallback_texts[idx])
+
+    # Tokenize all texts
     batch = []
     for text in texts:
         tokens = tokenizer(text, return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0]
