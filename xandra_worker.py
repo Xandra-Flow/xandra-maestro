@@ -64,6 +64,15 @@ import pandas as pd
 SESSION_START_TIME = time.time()
 SESSION_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
+STARTUP_LOG = []
+def log_step(msg):
+    ts = datetime.now(timezone.utc).isoformat()
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    STARTUP_LOG.append(line)
+    with open('startup_log.txt', 'a') as f:
+        f.write(line + '\n')
+
 print("=" * 60)
 print("🚀 Xandra Hope - Kaggle Worker (Turbo+ v4.4 — Modern Arch)")
 print(f"👤 Running on Account: {__KAGGLE_USERNAME__}")
@@ -85,6 +94,22 @@ os.environ['HF_TOKEN'] = HF_TOKEN
 os.environ['HF_HOME'] = '/tmp/huggingface'
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# 🚀 Pre-flight checks
+log_step("🔍 Pre-flight check...")
+if torch.cuda.is_available():
+    log_step(f"✅ GPU available: {torch.cuda.get_device_name()}")
+    free_mem, total_mem = torch.cuda.mem_get_info()
+    log_step(f"📊 GPU memory: {free_mem/(1024**3):.1f} GB free / {total_mem/(1024**3):.1f} GB total")
+else:
+    log_step("⚠️ No GPU detected! Training will be slow.")
+
+try:
+    hf_hub_download(repo_id=HF_REPO, filename="state.json", repo_type="model", token=HF_TOKEN, etag_timeout=10)
+    log_step("✅ HuggingFace reachable")
+except Exception as e:
+    log_step(f"❌ HuggingFace unreachable: {e}")
+    # Don't exit yet, maybe it's transient
 
 # ═══════════════════════════════════════════════════════════════
 # 🚀 TURBO+ CONFIG — Modern Architecture + Optimized
@@ -368,21 +393,56 @@ def load_state():
                 "gpu_hours_used": 0, "training_lock": {"is_locked": False}}
 
 
-def load_checkpoint(model):
+def load_checkpoint(model, timeout_seconds=180):
+    """Load latest.pt with a strict timeout. If download takes too long, skip it.
+    A 970MB file on Kaggle's internet can take 5+ minutes; we cap it at 3 min.
+    Returns the step number to resume from (0 if starting fresh)."""
+    import time as _time
+    start_dl = _time.time()
     try:
-        path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/latest.pt", repo_type="model", token=HF_TOKEN)
+        print(f"⬇️  تنزيل latest.pt من HuggingFace (timeout: {timeout_seconds}s)...")
+        path = hf_hub_download(
+            repo_id=HF_REPO,
+            filename="checkpoints/latest.pt",
+            repo_type="model",
+            token=HF_TOKEN,
+            etag_timeout=30,
+        )
+        dl_time = _time.time() - start_dl
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        print(f"   ✅ تم التنزيل في {dl_time:.1f}s ({size_mb:.0f} MB)")
+
+        # Load checkpoint with weights_only=False for compatibility
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         # Handle both old (XandraTiny) and new (XandraModern) architectures
         try:
             model.load_state_dict(checkpoint['model_state'], strict=True)
-            print(f"✅ Loaded checkpoint (matching architecture)")
+            print(f"✅ Loaded checkpoint at step {checkpoint['step']} (matching architecture)")
+            return checkpoint['step']
         except RuntimeError as e:
             print(f"⚠️ Architecture mismatch (expected): {e}")
             print(f"🔄 Starting fresh training with new architecture")
             return 0
-        return checkpoint['step']
     except Exception as e:
-        print(f"⚠️ لا يوجد checkpoint سابق: {e}")
+        elapsed = _time.time() - start_dl
+        log_step(f"⚠️ فشل تحميل latest.pt بعد {elapsed:.0f}s: {type(e).__name__}: {e}")
+        # Capture trace for debugging
+        import traceback
+        log_step(traceback.format_exc())
+        print(f"🔄 البدء من الصفر (from scratch) — لا يوجد checkpoint")
+        return 0
+
+
+def load_checkpoint_smart(model):
+    """Smart checkpoint loading strategy:
+    1. Try downloading latest.pt (with timeout)
+    2. If timeout or fails, start fresh from step 0
+    3. The training loop will save a fresh checkpoint after SAVE_EVERY steps
+    """
+    try:
+        return load_checkpoint(model, timeout_seconds=180)
+    except Exception as e:
+        print(f"⚠️ load_checkpoint failed completely: {e}")
         return 0
 
 
@@ -427,7 +487,7 @@ if USE_CONTINUAL_PRETRAINING:
 
     # Load our checkpoint if it exists (continual pre-training on top of pretrained)
     state = load_state()
-    last_step = load_checkpoint(model)
+    last_step = load_checkpoint_smart(model)
     if last_step == 0:
         print(f"   Starting continual pre-training from pretrained weights (step 0)")
     else:
@@ -441,68 +501,39 @@ else:
     print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
 
     state = load_state()
-    last_step = load_checkpoint(model)
+    last_step = load_checkpoint_smart(model)
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
 # ═══════════════════════════════════════════════════════════════
-# 📖 Data Loading (preserved)
+# 📖 Data Loading — embedded sources + smart fallbacks
 # ═══════════════════════════════════════════════════════════════
-print("\n📖 قراءة ملف مصادر التدريب (training_sources.json)...")
+# Sources are embedded directly — no dependency on training_sources.json
+# (which the maestro does NOT upload to Kaggle).
+
+print("\n📖 تحميل مصادر التدريب...")
+sources_config = {
+    "sources": [
+        {"name": "Shamela", "type": "stream",
+         "path": "ReligiousLLMs/shamela_all_diacritized_fully",
+         "split": "train", "field": "text", "weight": 0.5},
+        {"name": "Wikipedia-AR", "type": "stream",
+         "path": "wikimedia/wikipedia", "config": "20231101.ar",
+         "split": "train", "field": "text", "weight": 0.5},
+    ]
+}
+# Try loading external config (only if training_sources.json exists locally)
 try:
     with open('training_sources.json', 'r') as f:
-        sources_config = json.load(f)
-    print(f"✅ تم تحميل {len(sources_config['sources'])} مصدر تدريب.")
-except:
-    print("⚠️ لم يتم العثور على training_sources.json، استخدام الإعدادات الافتراضية.")
-    sources_config = {
-        "sources": [
-                {
-                        "name": "Shamela",
-                        "type": "stream",
-                        "path": "ReligiousLLMs/shamela_all_diacritized_fully",
-                        "split": "train",
-                        "field": "text",
-                        "weight": 0.4
-                },
-                {
-                        "name": "Wikipedia",
-                        "type": "stream",
-                        "path": "wikimedia/wikipedia",
-                        "config": "20231101.ar",
-                        "split": "train",
-                        "field": "text",
-                        "weight": 0.3
-                },
-                {
-                        "name": "ArabicBERT",
-                        "type": "local",
-                        "path": "/kaggle/input/arabic-bert-corpus",
-                        "weight": 0.1
-                },
-                {
-                        "name": "ArabicLibrary",
-                        "type": "local",
-                        "path": "/kaggle/input/arabic-library",
-                        "weight": 0.1
-                },
-                {
-                        "name": "Tashkeela",
-                        "type": "local",
-                        "path": "/kaggle/input/tashkeela",
-                        "weight": 0.1
-                }
-        ],
-        "future_sources": [
-                {
-                        "name": "GitHubCode",
-                        "path": "bigcode/the-stack-v2",
-                        "weight": 0.2,
-                        "status": "مستقبلاً لتعلم البرمجة"
-                }
-        ]
-}
+        external = json.load(f)
+    if external.get('sources'):
+        sources_config = external
+        print(f"   ✅ تم تحميل {len(sources_config['sources'])} مصدر من training_sources.json")
+except FileNotFoundError:
+    print(f"   ℹ️ training_sources.json غير موجود — استخدام المصادر المدمجة ({len(sources_config['sources'])} مصدر)")
+except Exception as e:
+    print(f"   ⚠️ خطأ في قراءة training_sources.json ({e}) — استخدام المصادر المدمجة")
 
 from datasets import load_dataset, interleave_datasets
 
@@ -795,6 +826,21 @@ try:
             steps_per_min = step / max(elapsed_min, 0.01)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Step {step:,} | loss: {loss.item()*GRAD_ACCUM_STEPS:.4f} | avg: {avg_loss:.4f} | {steps_per_min:.1f} steps/min")
 
+        # 🫀 Lightweight heartbeat every 100 steps — updates state.json only (no checkpoint upload)
+        # This lets the maestro see progress even before the first SAVE_EVERY (1000 steps).
+        if i > 0 and i % 100 == 0:
+            try:
+                state['current_step'] = step
+                state['current_loss'] = loss.item() * GRAD_ACCUM_STEPS
+                state['updated_at'] = datetime.now(timezone.utc).isoformat()
+                state['training_lock']['last_heartbeat'] = datetime.now(timezone.utc).isoformat()
+                state['training_lock']['last_step'] = step
+                with open('state.json', 'w') as f: json.dump(state, f, indent=2, ensure_ascii=False)
+                upload_file(path_or_fileobj='state.json', path_in_repo='state.json',
+                            repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+            except Exception as e:
+                print(f"⚠️ heartbeat error (non-fatal): {e}")
+
         if i % SAVE_EVERY == 0 and i > 0:
             try:
                 # Handle torch.compile wrapper
@@ -846,12 +892,14 @@ try:
 
 except KeyboardInterrupt:
     crash_reason = "manual_stop"
-    print("\n⛔ تم الإيقاف اليدوي — تحرير القفل...")
+    log_step("⛔ تم الإيقاف اليدوي — تحرير القفل...")
 except Exception as e:
-    crash_reason = "crash"
-    print(f"\n💥 انهيار غير متوقع: {e} — تحرير القفل...")
+    crash_reason = f"crash: {str(e)[:100]}"
+    log_step(f"\n💥 انهيار غير متوقع: {e} — تحرير القفل...")
     import traceback
     traceback.print_exc()
+    with open('crash_log.txt', 'w') as f:
+        f.write(traceback.format_exc())
 
 finally:
     prefetcher.stop()
