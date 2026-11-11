@@ -918,7 +918,7 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
             with open(worker_code_path, "r") as f:
                 worker_code = f.read()
             # Inject the real username
-            worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
+            worker_code = worker_code.replace('__KAGGLE_USERNAME_VALUE__', username)
             with open(dest_path, "w") as f:
                 f.write(worker_code)
             
@@ -1097,7 +1097,7 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
         with open(worker_code_path, "r") as f:
             worker_code = f.read()
         # Inject the real username
-        worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
+        worker_code = worker_code.replace('__KAGGLE_USERNAME_VALUE__', username)
 
         # Get auth + headers
         auth, headers = get_kaggle_auth(account)
