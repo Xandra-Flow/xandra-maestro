@@ -31,8 +31,9 @@ UPGRADE NOTES (v4.3 → v4.4 TURBO+):
   + try/finally + heartbeat + exit_reason
 """
 
-# هذا المتغير سيتم استبداله تلقائياً بواسطة المايسترو باسم المستخدم الحقيقي
-__KAGGLE_USERNAME__ = "manual_run"
+# هذا المتغير سيتم استبدال قيمته تلقائياً بواسطة المايسترو باسم المستخدم الحقيقي
+# المايسترو يستبدل "__KAGGLE_USERNAME_VALUE__" باسم الحساب الفعلي
+KAGGLE_USERNAME = "__KAGGLE_USERNAME_VALUE__"
 
 import subprocess
 import sys
@@ -75,7 +76,7 @@ def log_step(msg):
 
 print("=" * 60)
 print("🚀 Xandra Hope - Kaggle Worker (Turbo+ v4.4 — Modern Arch)")
-print(f"👤 Running on Account: {__KAGGLE_USERNAME__}")
+print(f"👤 Running on Account: {KAGGLE_USERNAME}")
 print(f"⏰ Session started at: {SESSION_STARTED_AT}")
 print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
@@ -115,7 +116,7 @@ except Exception as e:
 # 🚀 TURBO+ CONFIG — Modern Architecture + Optimized
 # ═══════════════════════════════════════════════════════════════
 LOCK_TIMEOUT_HOURS = 12
-WORKER_ID = f"kaggle-{__KAGGLE_USERNAME__}"
+WORKER_ID = f"kaggle-{KAGGLE_USERNAME}"
 HEARTBEAT_EVERY_STEPS = 1000
 
 # 🚀 Training hyperparameters — OPTIMIZED
