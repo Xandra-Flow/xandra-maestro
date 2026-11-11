@@ -82,14 +82,21 @@ print("Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &")
 print("               Александра Евгеньевна Острикова")
 print("=" * 60)
 
+KAGGLE_USERNAME = "__KAGGLE_USERNAME_VALUE__"
+INJECTED_HF_TOKEN = "__HF_TOKEN_VALUE__"
+INJECTED_HF_REPO = "__HF_REPO_VALUE__"
+
 try:
     from kaggle_secrets import UserSecretsClient
     secrets = UserSecretsClient()
     HF_TOKEN = secrets.get_secret("HF_TOKEN")
     HF_REPO = secrets.get_secret("HF_REPO")
 except:
-    HF_TOKEN = os.environ.get("HF_TOKEN", "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")
-    HF_REPO = os.environ.get("HF_REPO", "smart-force/xandra-training-state")
+    HF_TOKEN = INJECTED_HF_TOKEN if not INJECTED_HF_TOKEN.startswith("__") else os.environ.get("HF_TOKEN")
+    HF_REPO = INJECTED_HF_REPO if not INJECTED_HF_REPO.startswith("__") else os.environ.get("HF_REPO")
+
+if not HF_TOKEN or not HF_REPO:
+    raise ValueError("❌ خطأ أمني: لم يتم العثور على HF_TOKEN أو HF_REPO. تأكد من حقنهما عبر المايسترو.")
 
 os.environ['HF_TOKEN'] = HF_TOKEN
 os.environ['HF_HOME'] = '/tmp/huggingface'
@@ -129,7 +136,7 @@ MAX_TIME_MINUTES = 650
 GRAD_ACCUM_STEPS = 4           # effective batch = 192
 USE_MIXED_PRECISION = True
 USE_TORCH_COMPILE = False      # Disabled — can fail on Kaggle environment
-USE_GRADIENT_CHECKPOINTING = True   # 🆕 allows bigger model in limited VRAM
+USE_GRADIENT_CHECKPOINTING = False   # 🆕 allows bigger model in limited VRAM
 PREFETCH_BATCHES = 2
 
 # 🧠 Model config — UPGRADED to modern architecture
@@ -857,6 +864,7 @@ try:
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
+            scheduler.step()
 
         step += 1
         losses.append(loss.item() * GRAD_ACCUM_STEPS)
