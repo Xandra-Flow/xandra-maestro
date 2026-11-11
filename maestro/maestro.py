@@ -543,22 +543,21 @@ def check_lock(state):
             elif kernel_state == "not_found":
                 # Notebook doesn't exist on this account → lock is stale
                 return False, "kernel_not_found"
-            elif kernel_state == "unknown_via_lock":
-                # 403 from Kaggle API — can't verify via API
-                # Check lock age: if older than 30 minutes, release it
-                # (Kaggle notebooks that crash still hold the lock, but
-                #  the Worker's finally block should release it. If it didn't,
-                #  it means the Worker crashed before reaching finally.)
-                locked_at = lock.get("locked_at")
-                if locked_at:
+			elif kernel_state == "unknown_via_lock":
+                # الاعتماد على آخر نبضة قلب أرسلها العامل بدلاً من وقت بداية الجلسة
+                last_hb = lock.get("last_heartbeat") or lock.get("locked_at")
+                if last_hb:
                     try:
-                        la_time = datetime.fromisoformat(locked_at.replace("Z", "+00:00"))
-                        age_hours = (now - la_time).total_seconds() / 3600
-                        if age_hours > 0.5:  # 30 minutes
-                            print(f"⚠️ قفل عمره {age_hours:.1f} ساعة مع 403 — تحرير (قد يكون Notebook معلّقاً)")
-                            return False, "stale_lock_403"
+                        hb_time = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+                        mins_since_hb = (now - hb_time).total_seconds() / 60
+                        # إذا لم تصل أي نبضة منذ أكثر من 25 دقيقة، فالعامل توقف فعلياً
+                        if mins_since_hb > 25:
+                            print(f"⚠️ توقفت نبضات العامل منذ {mins_since_hb:.1f} دقيقة — تحرير القفل")
+                            return False, "heartbeat_timeout"
+                        else:
+                            print(f"💓 العامل نشط (آخر نبضة منذ {mins_since_hb:.1f} دقيقة) — انتظار")
+                            return True, "running_via_heartbeat"
                     except: pass
-                # Lock is fresh (< 30 min) — assume running
                 return True, "running_assumed"
             # else: unknown → fall through to time-based check
 
