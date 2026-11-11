@@ -919,6 +919,8 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
                 worker_code = f.read()
             # Inject the real username
             worker_code = worker_code.replace('__KAGGLE_USERNAME_VALUE__', username)
+            worker_code = worker_code.replace('__HF_TOKEN_VALUE__', HF_TOKEN or "")
+            worker_code = worker_code.replace('__HF_REPO_VALUE__', HF_REPO or "")
             with open(dest_path, "w") as f:
                 f.write(worker_code)
             
@@ -1096,8 +1098,10 @@ def push_kaggle_kernel_via_api(account, worker_code_path):
         # Read the worker code
         with open(worker_code_path, "r") as f:
             worker_code = f.read()
-        # Inject the real username
+        # Inject the real username and HF credentials
         worker_code = worker_code.replace('__KAGGLE_USERNAME_VALUE__', username)
+        worker_code = worker_code.replace('__HF_TOKEN_VALUE__', HF_TOKEN or "")
+        worker_code = worker_code.replace('__HF_REPO_VALUE__', HF_REPO or "")
 
         # Get auth + headers
         auth, headers = get_kaggle_auth(account)
@@ -1277,6 +1281,15 @@ def main():
     # Step 3: report account statuses
     print("\n📊 تقرير الحسابات:")
     account, remaining_hours, account_stats = select_available_account(state)
+        usage_map = {}
+    for s in account_stats:
+        usage_map[s["username"]] = {
+            "used": s["weekly_hours"],
+            "remaining": max(0, s["remaining"]),
+            "sessions": s["sessions"]
+        }
+    state["account_usage"] = usage_map
+    
     for s in account_stats:
         marker = "✅" if s["excluded_reason"] is None else "⛔"
         reason = f" [{s['excluded_reason']}]" if s["excluded_reason"] else ""
