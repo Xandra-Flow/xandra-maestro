@@ -943,44 +943,84 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
                 _json.dump(metadata, f, indent=2)
             
             # 3. Set up Kaggle credentials for this account
-            #    Try multiple methods to maximize compatibility with kaggle CLI 2.x
+            #    The user's GitHub Secrets contain:
+            #      - KAGGLE_USERNAME + KAGGLE_KEY (for account 1)
+            #      - KAGGLE_USERNAME_N + KAGGLE_KEY_N (for accounts 2-6)
+            #    IMPORTANT: KAGGLE_KEY_* actually contains KGAT_ tokens (not legacy 32-hex keys)!
+            #    This was confirmed by the maestro logs showing:
+            #      "***:Bearer(key=KGAT_68f8892...) [not 32-hex]"
+            #
+            #    kaggle CLI 2.x reads KAGGLE_API_TOKEN env var OR ~/.kaggle/access_token file.
+            #    Since our token is in account["key"] (named KAGGLE_KEY but actually KGAT_),
+            #    we need to PASS it as KAGGLE_API_TOKEN to the CLI.
             kaggle_dir = _os.path.join(_os.path.expanduser("~"), ".kaggle")
             _os.makedirs(kaggle_dir, exist_ok=True)
             work_kaggle_dir = _os.path.join(work_dir, ".kaggle")
             _os.makedirs(work_kaggle_dir, exist_ok=True)
             
-            # Method A: Try KGAT_ token (new format — preferred by kaggle CLI 2.x)
-            if account.get("api_token") and account["api_token"].startswith("KGAT_"):
-                # Write access_token file to BOTH ~/.kaggle/ and work_dir/.kaggle/
+            # 🔑 Extract KGAT_ token — it's stored in account["key"] (named KAGGLE_KEY)
+            # In the user's setup, KAGGLE_KEY_* actually contains KGAT_xxx tokens
+            kgat_token = None
+            key_value = (account.get("key") or "").strip()
+            
+            # Method 1: KAGGLE_KEY contains a KGAT_ token (most likely scenario for this user)
+            if key_value.startswith("KGAT_"):
+                kgat_token = key_value
+                print(f"   🔑 Found KGAT_ token in account['key'] (KAGGLE_KEY_{account['index']})")
+            
+            # Method 2: account["api_token"] has it (rare in this user's setup)
+            elif account.get("api_token", "").startswith("KGAT_"):
+                kgat_token = account["api_token"]
+                print(f"   🔑 Found KGAT_ token in account['api_token']")
+            
+            # Method 3: Try get_kaggle_auth() (which works for REST API)
+            else:
+                try:
+                    auth_obj, auth_headers = get_kaggle_auth(account)
+                    auth_str = auth_headers.get('Authorization', '')
+                    if 'Bearer' in auth_str:
+                        bearer_part = auth_str.split('Bearer', 1)[-1].strip()
+                        if bearer_part.startswith('KGAT_'):
+                            kgat_token = bearer_part
+                            print(f"   🔑 Extracted KGAT_ token from get_kaggle_auth()")
+                except Exception as e:
+                    print(f"   ⚠️ Could not extract KGAT_ token: {e}")
+            
+            # Write KGAT_ token to ~/.kaggle/access_token (Option B for kaggle CLI 2.x)
+            if kgat_token:
                 for d in [kaggle_dir, work_kaggle_dir]:
                     token_file = _os.path.join(d, "access_token")
                     with open(token_file, "w") as f:
-                        f.write(account["api_token"])
+                        f.write(kgat_token)
                     _os.chmod(token_file, 0o600)
                 print(f"   🔑 Wrote KGAT_ token to ~/.kaggle/access_token")
+            else:
+                print(f"   ⚠️ No KGAT_ token found! Will try legacy kaggle.json only.")
             
-            # Method B: ALSO write legacy kaggle.json (works with CLI 1.x and 2.x as fallback)
+            # ALSO write legacy kaggle.json (some CLI versions still try it)
             kaggle_json_path = _os.path.join(kaggle_dir, "kaggle.json")
             work_kaggle_json_path = _os.path.join(work_kaggle_dir, "kaggle.json")
             kaggle_json = {
                 "username": username,
-                "key": account.get("key", "")
+                "key": account.get("key", "")  # KGAT_ token here too (CLI 1.x will ignore format)
             }
             for p in [kaggle_json_path, work_kaggle_json_path]:
                 with open(p, "w") as f:
                     _json.dump(kaggle_json, f)
                 _os.chmod(p, 0o600)
-            print(f"   🔑 Wrote kaggle.json to ~/.kaggle/ (legacy fallback)")
+            print(f"   🔑 Wrote kaggle.json to ~/.kaggle/ (with username + key)")
             
             # 4. Run `kaggle kernels push` — this AUTO-RUNS the notebook!
             env = dict(_os.environ)
             # Set ALL possible auth env vars to maximize CLI compatibility
             env["KAGGLE_CONFIG_DIR"] = kaggle_dir
             env["KAGGLE_USERNAME"] = username
+            # 🚀 CRITICAL: Pass KGAT_ token as KAGGLE_API_TOKEN (Option A for kaggle CLI 2.x)
+            if kgat_token:
+                env["KAGGLE_API_TOKEN"] = kgat_token
+            # Also set KAGGLE_KEY (in case the CLI tries legacy)
             if account.get("key"):
                 env["KAGGLE_KEY"] = account["key"]
-            if account.get("api_token"):
-                env["KAGGLE_API_TOKEN"] = account["api_token"]
             # Make sure HOME is set so ~/.kaggle/ is found
             env["HOME"] = _os.path.expanduser("~")
             
