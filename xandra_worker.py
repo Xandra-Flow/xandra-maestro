@@ -128,12 +128,12 @@ HEARTBEAT_EVERY_STEPS = 1000
 
 # 🚀 Training hyperparameters — OPTIMIZED
 MAX_STEPS = 1000000
-BATCH_SIZE = 32                # safe for Kaggle GPU (was 48 — too big, caused OOM)
+BATCH_SIZE = 8                # safe for Kaggle GPU (was 48 — too big, caused OOM)
 MAX_LEN = 512                  # 🚀 2x longer context with RoPE!
 LEARNING_RATE = 3e-4
 SAVE_EVERY = 1000
 MAX_TIME_MINUTES = 650
-GRAD_ACCUM_STEPS = 4           # effective batch = 192
+GRAD_ACCUM_STEPS = 16           # effective batch = 192
 USE_MIXED_PRECISION = True
 USE_TORCH_COMPILE = False      # Disabled — can fail on Kaggle environment
 USE_GRADIENT_CHECKPOINTING = False   # 🆕 allows bigger model in limited VRAM
@@ -1020,3 +1020,6 @@ finally:
             release_lock(state, reason=f"finally_error: {str(e)[:50]}")
         except:
             print("💀 فشل تحرير القفل — يجب التدخل اليدوي")
+    finally:
+        import os
+        os._exit(0)  # إغلاق إجباري فوري للحاوية ومنع حرق الساعات عند التوقف
