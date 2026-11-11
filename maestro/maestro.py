@@ -893,14 +893,143 @@ def ensure_kaggle_cli():
         return False
 
 
+def push_kaggle_kernel_via_cli(account, worker_code_path):
+    """
+    Pushes the kernel via kaggle CLI (which AUTOMATICALLY RUNS the notebook after push).
+    
+    Per official Kaggle docs (https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md):
+    "kaggle kernels push - Pushes new code/notebook and metadata to a kernel, then runs the kernel."
+    
+    This is the ONLY way to trigger notebook execution via API/CLI.
+    The REST API (POST /api/v1/kernels/push) only SAVES the notebook without running it.
+    
+    Returns True on success.
+    """
+    username = account["username"]
+    try:
+        import tempfile, json as _json, shutil, os as _os
+        
+        # Create a temporary directory for the kernel metadata
+        work_dir = tempfile.mkdtemp(prefix=f"kaggle_push_{username}_")
+        try:
+            # 1. Copy the worker code to the work directory
+            worker_filename = "xandra_worker.py"
+            dest_path = _os.path.join(work_dir, worker_filename)
+            with open(worker_code_path, "r") as f:
+                worker_code = f.read()
+            # Inject the real username
+            worker_code = worker_code.replace('__KAGGLE_USERNAME__', username)
+            with open(dest_path, "w") as f:
+                f.write(worker_code)
+            
+            # 2. Create kernel-metadata.json
+            #    Per https://github.com/Kaggle/kaggle-api/wiki/Kernel-Metadata
+            metadata = {
+                "id": f"{username}/xandra-worker",
+                "title": "xandra-worker",
+                "code_file": worker_filename,
+                "language": "python",
+                "kernel_type": "script",
+                "is_private": "true",
+                "enable_gpu": "true",
+                "enable_internet": "true",
+                "dataset_sources": [],
+                "kernel_sources": [],
+                "competition_sources": [],
+                "model_sources": []
+            }
+            metadata_path = _os.path.join(work_dir, "kernel-metadata.json")
+            with open(metadata_path, "w") as f:
+                _json.dump(metadata, f, indent=2)
+            
+            # 3. Set up Kaggle credentials for this account
+            #    Use KAGGLE_CONFIG_DIR env var so the CLI finds our kaggle.json
+            kaggle_dir = _os.path.join(work_dir, ".kaggle")
+            _os.makedirs(kaggle_dir, exist_ok=True)
+            
+            # Try new KGAT_ token first
+            if account.get("api_token") and account["api_token"].startswith("KGAT_"):
+                # New API token format — write access_token file
+                with open(_os.path.join(kaggle_dir, "access_token"), "w") as f:
+                    f.write(account["api_token"])
+                print(f"   🔑 Using new KGAT_ token (access_token file)")
+            else:
+                # Legacy kaggle.json format
+                kaggle_json = {
+                    "username": username,
+                    "key": account.get("key", "")
+                }
+                with open(_os.path.join(kaggle_dir, "kaggle.json"), "w") as f:
+                    _json.dump(kaggle_json, f)
+                _os.chmod(_os.path.join(kaggle_dir, "kaggle.json"), 0o600)
+                print(f"   🔑 Using legacy kaggle.json format")
+            
+            # 4. Run `kaggle kernels push` — this AUTO-RUNS the notebook!
+            env = dict(_os.environ)
+            env["KAGGLE_CONFIG_DIR"] = kaggle_dir
+            env["KAGGLE_USERNAME"] = username
+            if account.get("key"):
+                env["KAGGLE_KEY"] = account["key"]
+            if account.get("api_token"):
+                env["KAGGLE_API_TOKEN"] = account["api_token"]
+            
+            print(f"   📤 Running: kaggle kernels push -p {work_dir}")
+            result = subprocess.run(
+                ["kaggle", "kernels", "push", "-p", work_dir],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                # Parse the output for kernel URL
+                output = result.stdout
+                print(f"   ✅ kaggle CLI output:")
+                for line in output.split("\n")[:10]:
+                    if line.strip():
+                        print(f"      {line}")
+                # Check if it includes the kernel URL
+                if "kaggle.com/code" in output or "xandra-worker" in output:
+                    print(f"✅ تم رفع الـ Notebook على {username} (slug: xandra-worker) [CLI — AUTO-RUNS!]")
+                    return True
+                elif "push" in output.lower() or "version" in output.lower():
+                    print(f"✅ تم رفع الـ Notebook على {username} [CLI]")
+                    return True
+                else:
+                    print(f"✅ Push completed (returncode=0)")
+                    return True
+            else:
+                print(f"   ❌ kaggle CLI failed (returncode={result.returncode})")
+                print(f"   stderr: {result.stderr[:500]}")
+                print(f"   stdout: {result.stdout[:500]}")
+                return False
+        finally:
+            # Cleanup
+            try:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            except:
+                pass
+    except subprocess.TimeoutExpired:
+        print(f"   ❌ kaggle CLI timed out (120s)")
+        return False
+    except Exception as e:
+        print(f"   ❌ kaggle CLI exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def push_kaggle_kernel_via_api(account, worker_code_path):
     """
     Pushes the kernel via the Kaggle REST API directly (POST /api/v1/kernels/push).
     Tries BOTH JSON and form-urlencoded payloads for maximum compatibility.
 
-    This bypasses kaggle CLI entirely — no auth issues, no env vars, no file paths.
-
-    Returns True on success.
+    ⚠️ WARNING: This ONLY SAVES the notebook — it does NOT auto-run it!
+    Use push_kaggle_kernel_via_cli() instead, which uses the kaggle CLI
+    (the only way to auto-trigger notebook execution from external code).
+    
+    Returns True on success (notebook saved, but NOT executed).
     """
     username = account["username"]
     try:
@@ -1007,6 +1136,13 @@ def launch_kaggle_notebook(account):
         worker_path = os.path.join(os.path.dirname(__file__), "..", "kaggle-worker", "xandra_worker.py")
         if not os.path.exists(worker_path):
             worker_path = "xandra_worker.py" # fallback
+        
+        # 🚀 Use kaggle CLI (auto-runs the notebook) — REST API only saves without running
+        if push_kaggle_kernel_via_cli(account, worker_path):
+            return True
+        
+        # Fallback: REST API (saves notebook but doesn't auto-run)
+        print(f"   ⚠️ kaggle CLI failed, falling back to REST API (note: notebook won't auto-run!)")
         return push_kaggle_kernel_via_api(account, worker_path)
     except Exception as e:
         print(f"❌ استثناء أثناء الإطلاق: {e}")
