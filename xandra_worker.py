@@ -147,8 +147,23 @@ def acquire_lock():
         lock = state.get('training_lock', {})
         if lock.get('is_locked'):
             locked_by = lock.get('locked_by', '')
-            if WORKER_ID in locked_by:
-                print(f"ℹ️ هذا الحساب يحمل القفل بالفعل — متابعة")
+            # 🚀 CRITICAL FIX: Extract username from locked_by (handles BOTH prefixes)
+            # Maestro uses "maestro-{username}", Worker uses "kaggle-{username}"
+            # We need to compare USERNAMES, not the full prefixed strings!
+            locked_username = locked_by
+            for prefix in ['maestro-', 'kaggle-']:
+                if locked_by.startswith(prefix):
+                    locked_username = locked_by[len(prefix):]
+                    break
+            my_username = KAGGLE_USERNAME
+            for prefix in ['maestro-', 'kaggle-']:
+                if my_username.startswith(prefix):
+                    my_username = my_username[len(prefix):]
+                    break
+            
+            if locked_username == my_username:
+                print(f"ℹ️ هذا الحساب ({my_username}) يحمل القفل بالفعل — متابعة")
+                # Re-acquire the lock with our own WORKER_ID
             else:
                 expires_at = lock.get('expires_at')
                 if expires_at:
@@ -157,7 +172,7 @@ def acquire_lock():
                         if datetime.now(timezone.utc) > exp_time:
                             print(f"⏰ القفل منتهي الصلاحية — اكتسابه من جديد")
                         else:
-                            print(f"⛔ القفل مشغول بواسطة {locked_by} — خروج")
+                            print(f"⛔ القفل مشغول بواسطة {locked_by} (username: {locked_username}) — خروج")
                             return False
                     except: pass
         state['training_lock'] = {
