@@ -943,35 +943,46 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
                 _json.dump(metadata, f, indent=2)
             
             # 3. Set up Kaggle credentials for this account
-            #    Use KAGGLE_CONFIG_DIR env var so the CLI finds our kaggle.json
-            kaggle_dir = _os.path.join(work_dir, ".kaggle")
+            #    Try multiple methods to maximize compatibility with kaggle CLI 2.x
+            kaggle_dir = _os.path.join(_os.path.expanduser("~"), ".kaggle")
             _os.makedirs(kaggle_dir, exist_ok=True)
+            work_kaggle_dir = _os.path.join(work_dir, ".kaggle")
+            _os.makedirs(work_kaggle_dir, exist_ok=True)
             
-            # Try new KGAT_ token first
+            # Method A: Try KGAT_ token (new format — preferred by kaggle CLI 2.x)
             if account.get("api_token") and account["api_token"].startswith("KGAT_"):
-                # New API token format — write access_token file
-                with open(_os.path.join(kaggle_dir, "access_token"), "w") as f:
-                    f.write(account["api_token"])
-                print(f"   🔑 Using new KGAT_ token (access_token file)")
-            else:
-                # Legacy kaggle.json format
-                kaggle_json = {
-                    "username": username,
-                    "key": account.get("key", "")
-                }
-                with open(_os.path.join(kaggle_dir, "kaggle.json"), "w") as f:
+                # Write access_token file to BOTH ~/.kaggle/ and work_dir/.kaggle/
+                for d in [kaggle_dir, work_kaggle_dir]:
+                    token_file = _os.path.join(d, "access_token")
+                    with open(token_file, "w") as f:
+                        f.write(account["api_token"])
+                    _os.chmod(token_file, 0o600)
+                print(f"   🔑 Wrote KGAT_ token to ~/.kaggle/access_token")
+            
+            # Method B: ALSO write legacy kaggle.json (works with CLI 1.x and 2.x as fallback)
+            kaggle_json_path = _os.path.join(kaggle_dir, "kaggle.json")
+            work_kaggle_json_path = _os.path.join(work_kaggle_dir, "kaggle.json")
+            kaggle_json = {
+                "username": username,
+                "key": account.get("key", "")
+            }
+            for p in [kaggle_json_path, work_kaggle_json_path]:
+                with open(p, "w") as f:
                     _json.dump(kaggle_json, f)
-                _os.chmod(_os.path.join(kaggle_dir, "kaggle.json"), 0o600)
-                print(f"   🔑 Using legacy kaggle.json format")
+                _os.chmod(p, 0o600)
+            print(f"   🔑 Wrote kaggle.json to ~/.kaggle/ (legacy fallback)")
             
             # 4. Run `kaggle kernels push` — this AUTO-RUNS the notebook!
             env = dict(_os.environ)
+            # Set ALL possible auth env vars to maximize CLI compatibility
             env["KAGGLE_CONFIG_DIR"] = kaggle_dir
             env["KAGGLE_USERNAME"] = username
             if account.get("key"):
                 env["KAGGLE_KEY"] = account["key"]
             if account.get("api_token"):
                 env["KAGGLE_API_TOKEN"] = account["api_token"]
+            # Make sure HOME is set so ~/.kaggle/ is found
+            env["HOME"] = _os.path.expanduser("~")
             
             print(f"   📤 Running: kaggle kernels push -p {work_dir}")
             result = subprocess.run(
@@ -986,7 +997,7 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
                 # Parse the output for kernel URL
                 output = result.stdout
                 print(f"   ✅ kaggle CLI output:")
-                for line in output.split("\n")[:10]:
+                for line in output.split("\n")[:15]:
                     if line.strip():
                         print(f"      {line}")
                 # Check if it includes the kernel URL
@@ -1001,8 +1012,17 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
                     return True
             else:
                 print(f"   ❌ kaggle CLI failed (returncode={result.returncode})")
-                print(f"   stderr: {result.stderr[:500]}")
-                print(f"   stdout: {result.stdout[:500]}")
+                print(f"   stderr: {result.stderr[:1000]}")
+                print(f"   stdout: {result.stdout[:1000]}")
+                # Diagnostic: check what's in ~/.kaggle/
+                try:
+                    ls_home_kaggle = subprocess.run(
+                        ["ls", "-la", kaggle_dir],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    print(f"   📂 ~/.kaggle/ contents:")
+                    print(f"      {ls_home_kaggle.stdout}")
+                except: pass
                 return False
         finally:
             # Cleanup
