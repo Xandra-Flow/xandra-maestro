@@ -1279,15 +1279,14 @@ def main():
     # Step 3: report account statuses
     print("\n📊 تقرير الحسابات:")
     account, remaining_hours, account_stats = select_available_account(state)
-        usage_map = {}
+    usage_map = {}
     for s in account_stats:
         usage_map[s["username"]] = {
             "used": s["weekly_hours"],
             "remaining": max(0, s["remaining"]),
             "sessions": s["sessions"]
         }
-    state["account_usage"] = usage_map
-    
+    state["account_usage"] = usage_map    
     for s in account_stats:
         marker = "✅" if s["excluded_reason"] is None else "⛔"
         reason = f" [{s['excluded_reason']}]" if s["excluded_reason"] else ""
