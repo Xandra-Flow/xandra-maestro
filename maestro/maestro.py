@@ -1280,6 +1280,11 @@ def main():
     print("\n📊 تقرير الحسابات:")
     account, remaining_hours, account_stats = select_available_account(state)
     existing_usage = state.get("account_usage", {})
+    current_week_id = datetime.now(timezone.utc).strftime("%Y-W%W")
+    saved_week_id = state.get("usage_week_id")
+    existing_usage = state.get("account_usage", {}) if saved_week_id == current_week_id else {}
+    state["usage_week_id"] = current_week_id
+
     usage_map = {}
     for s in account_stats:
         uname = s["username"]
@@ -1291,6 +1296,7 @@ def main():
             "sessions": max(existing_usage.get(uname, {}).get("sessions", 0), s["sessions"])
         }
     state["account_usage"] = usage_map
+
  
     for s in account_stats:
         marker = "✅" if s["excluded_reason"] is None else "⛔"
