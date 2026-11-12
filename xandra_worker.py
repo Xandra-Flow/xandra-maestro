@@ -571,17 +571,16 @@ sources_config = {
          "split": "train", "field": "text", "weight": 0.5},
     ]
 }
-# Try loading external config (only if training_sources.json exists locally)
+# Try loading external config directly from HuggingFace Cloud
 try:
-    with open('training_sources.json', 'r') as f:
+    sources_path = hf_hub_download(repo_id=HF_REPO, filename="training_sources.json", repo_type="model", token=HF_TOKEN)
+    with open(sources_path, 'r', encoding='utf-8') as f:
         external = json.load(f)
     if external.get('sources'):
         sources_config = external
-        print(f"   ✅ تم تحميل {len(sources_config['sources'])} مصدر من training_sources.json")
-except FileNotFoundError:
-    print(f"   ℹ️ training_sources.json غير موجود — استخدام المصادر المدمجة ({len(sources_config['sources'])} مصدر)")
+        print(f"   ✅ تم جلب {len(sources_config['sources'])} مصدر من السحابة (training_sources.json)")
 except Exception as e:
-    print(f"   ⚠️ خطأ في قراءة training_sources.json ({e}) — استخدام المصادر المدمجة")
+    print(f"   ℹ️ تعذر جلب training_sources.json السحابي ({e}) — استخدام المصادر المدمجة")
 
 from datasets import load_dataset, interleave_datasets
 
