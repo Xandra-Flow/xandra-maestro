@@ -1297,7 +1297,7 @@ def main():
     current_week_id = f"kaggle-week-{saturday_start}"
     
     saved_week_id = state.get("usage_week_id")
-    if saved_week_id != current_week_id:
+    if saved_week_id and saved_week_id != current_week_id:
         print(f"📅 تجددت باقة كاجل الأسبوعية ({current_week_id}) — تصفير أرصدة جميع الحسابات إلى 30 ساعة!")
         existing_usage = {}
     else:
