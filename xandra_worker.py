@@ -615,10 +615,13 @@ for source in sources_config["sources"]:
         print(f"⚠️ فشل تحميل {source['name']}: {e}")
 
 if len(stream_datasets) > 0:
+    total_w = sum(stream_weights)
+    stream_weights = [w / total_w for w in stream_weights]
     combined_stream = interleave_datasets(stream_datasets, probabilities=stream_weights, seed=42)
     STREAMING_READY = True
 else:
     STREAMING_READY = False
+
 
 # Buffer to cache texts from streaming (avoids re-iterating exhausted streams)
 TEXT_BUFFER = []
