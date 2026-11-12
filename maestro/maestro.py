@@ -543,21 +543,20 @@ def check_lock(state):
             elif kernel_state == "not_found":
                 # Notebook doesn't exist on this account → lock is stale
                 return False, "kernel_not_found"
-			elif kernel_state == "unknown_via_lock":
-                # الاعتماد على آخر نبضة قلب أرسلها العامل بدلاً من وقت بداية الجلسة
+            elif kernel_state == "unknown_via_lock":
                 last_hb = lock.get("last_heartbeat") or lock.get("locked_at")
                 if last_hb:
                     try:
                         hb_time = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
                         mins_since_hb = (now - hb_time).total_seconds() / 60
-                        # إذا لم تصل أي نبضة منذ أكثر من 25 دقيقة، فالعامل توقف فعلياً
                         if mins_since_hb > 25:
                             print(f"⚠️ توقفت نبضات العامل منذ {mins_since_hb:.1f} دقيقة — تحرير القفل")
                             return False, "heartbeat_timeout"
                         else:
                             print(f"💓 العامل نشط (آخر نبضة منذ {mins_since_hb:.1f} دقيقة) — انتظار")
                             return True, "running_via_heartbeat"
-                    except: pass
+                    except Exception:
+                        pass
                 return True, "running_assumed"
             # else: unknown → fall through to time-based check
 
