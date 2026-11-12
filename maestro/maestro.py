@@ -1279,21 +1279,65 @@ def main():
     # Step 3: report account statuses
     print("\n📊 تقرير الحسابات:")
     account, remaining_hours, account_stats = select_available_account(state)
+    
+    # 🛡️ PRESERVE manually_set account_usage (don't delete on refresh!)
+    # Old logic: re-compute from history → loses user edits when history is empty
+    # New logic: 
+    #   - If user manually set hours via Dashboard → respect it (max with weekly_hours)
+    #   - If account has never been edited → use weekly_hours from history
+    #   - If week changed → preserve manually_set entries, reset others
     existing_usage = state.get("account_usage", {})
     current_week_id = datetime.now(timezone.utc).strftime("%Y-W%W")
     saved_week_id = state.get("usage_week_id")
-    existing_usage = state.get("account_usage", {}) if saved_week_id == current_week_id else {}
+    
+    # If week changed: reset only NON-manually-set entries
+    if saved_week_id != current_week_id:
+        print(f"📅 بدء أسبوع جديد ({current_week_id}) — إعادة ضبط الساعات غير المخصصة يدوياً")
+        new_existing = {}
+        for uname, udata in existing_usage.items():
+            if udata.get("manually_set"):
+                new_existing[uname] = udata  # preserve user-set values
+            # else: don't copy — will be re-computed from history
+        existing_usage = new_existing
+    
     state["usage_week_id"] = current_week_id
 
     usage_map = {}
+    # First: copy ALL manually_set entries (preserves them even if account not in KAGGLE_ACCOUNTS)
+    for uname, udata in existing_usage.items():
+        if udata.get("manually_set"):
+            usage_map[uname] = {
+                "used": udata.get("used", 0),
+                "remaining": udata.get("remaining", 30),
+                "sessions": udata.get("sessions", 0),
+                "manually_set": True,
+                "manually_set_at": udata.get("manually_set_at")
+            }
+    
+    # Then: add/update accounts from account_stats
     for s in account_stats:
         uname = s["username"]
-        prev_used = existing_usage.get(uname, {}).get("used", 0)
-        total_used = round(max(prev_used, s["weekly_hours"]), 2)
+        prev = existing_usage.get(uname, {})
+        prev_used = prev.get("used", 0)
+        prev_manually_set = prev.get("manually_set", False)
+        
+        # If manually set, use max(manually_set_value, weekly_hours)
+        # If not, use weekly_hours from history (or prev_used if week didn't change)
+        weekly_hours = s.get("weekly_hours", 0)
+        
+        if prev_manually_set:
+            # Respect manual value, but also account for any new sessions this week
+            total_used = round(max(prev_used, weekly_hours), 2)
+        else:
+            # Use max of prev_used (preserved from last run) and weekly_hours
+            total_used = round(max(prev_used, weekly_hours), 2)
+        
         usage_map[uname] = {
             "used": total_used,
             "remaining": round(max(0, 30.0 - total_used), 2),
-            "sessions": max(existing_usage.get(uname, {}).get("sessions", 0), s["sessions"])
+            "sessions": max(prev.get("sessions", 0), s.get("sessions", 0)),
+            "manually_set": prev_manually_set,
+            "manually_set_at": prev.get("manually_set_at")
         }
     state["account_usage"] = usage_map
 
