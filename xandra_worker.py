@@ -458,21 +458,18 @@ def load_checkpoint(model, timeout_seconds=180):
 
 
 def load_checkpoint_smart(model):
-    """Smart checkpoint loading strategy:
-    1. Try downloading latest.pt (with timeout)
-    2. If timeout or fails, EXIT — DO NOT start from 0 (would lose 91k steps of progress!)
-    3. The maestro will retry later when HF CDN is faster.
-    """
+    if state.get("current_step", 0) == 0:
+        print("🌱 بداية تدريب جديدة ونظيفة من الخطوة 0 للمعمارية الحديثة XandraModern.")
+        return 0
     try:
         return load_checkpoint(model, timeout_seconds=180)
     except Exception as e:
         print(f"⚠️ load_checkpoint failed completely: {e}")
-        print(f"🚫 لن نبدأ من الصفر — سنخسر تقدم 91,024 خطوة!")
-        # Write a signal file so the maestro can detect this failure mode
+        print(f"🚫 لن نبدأ من الصفر — سنخسر تقدم {state.get('current_step')} خطوة!")
         with open('CHECKPOINT_DOWNLOAD_FAILED.txt', 'w') as f:
             f.write(f"Failed at {datetime.now(timezone.utc).isoformat()}: {e}\n")
-        # Exit with non-zero so Kaggle marks the run as failed
         sys.exit(2)
+
 
 
 if not acquire_lock():
