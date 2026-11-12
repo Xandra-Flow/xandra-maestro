@@ -1269,9 +1269,14 @@ def main():
 
     state = get_state()
 
+    if state.get("system_paused"):
+        print("⏸️ النظام متوقف مؤقتاً من لوحة التحكم (system_paused=True) — لن يتم إطلاق أي جلسات.")
+        return
+
     # Step 1: refresh kernel status map (this is the key upgrade)
     print("\n📡 تحديث خريطة حالة الـ kernels من Kaggle...")
     state = update_kernel_status_map(state)
+
 
     # Step 2: compute session gaps for the dashboard
     compute_session_gaps(state)
