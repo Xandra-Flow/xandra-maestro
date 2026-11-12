@@ -1,47 +1,37 @@
 {
   "sources": [
     {
-      "name": "Shamela",
+      "name": "Xandra-Arabic-Corpus",
       "type": "stream",
-      "path": "ReligiousLLMs/shamela_all_diacritized_fully",
+      "path": "smart-force/xandra-arabic-corpus",
       "split": "train",
       "field": "text",
-      "weight": 0.4
+      "weight": 0.5
     },
     {
-      "name": "Wikipedia",
+      "name": "Xandra-Tech-Corpus",
       "type": "stream",
-      "path": "wikimedia/wikipedia",
-      "config": "20231101.ar",
+      "path": "smart-force/xandra-tech-corpus",
       "split": "train",
       "field": "text",
       "weight": 0.3
     },
     {
-      "name": "ArabicBERT",
-      "type": "local",
-      "path": "/kaggle/input/arabic-bert-corpus",
+      "name": "Shamela",
+      "type": "stream",
+      "path": "ReligiousLLMs/shamela_all_diacritized_fully",
+      "split": "train",
+      "field": "text",
       "weight": 0.1
     },
     {
-      "name": "ArabicLibrary",
-      "type": "local",
-      "path": "/kaggle/input/arabic-library",
+      "name": "Wikipedia-AR",
+      "type": "stream",
+      "path": "wikimedia/wikipedia",
+      "config": "20231101.ar",
+      "split": "train",
+      "field": "text",
       "weight": 0.1
-    },
-    {
-      "name": "Tashkeela",
-      "type": "local",
-      "path": "/kaggle/input/tashkeela",
-      "weight": 0.1
-    }
-  ],
-  "future_sources": [
-    {
-      "name": "GitHubCode",
-      "path": "bigcode/the-stack-v2",
-      "weight": 0.2,
-      "status": "مستقبلاً لتعلم البرمجة"
     }
   ]
 }
