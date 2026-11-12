@@ -196,7 +196,23 @@ def acquire_lock():
 
 
 def release_lock(state_dict, reason="completed"):
+    """🛡️ Smart release_lock — preserves admin edits (account_usage, manually_set, etc)."""
     try:
+        # 🛡️ Fetch latest state from HF to preserve admin edits
+        try:
+            latest_path = hf_hub_download(repo_id=HF_REPO, filename="state.json", 
+                                          repo_type="model", token=HF_TOKEN)
+            with open(latest_path) as f:
+                latest_state = json.load(f)
+            
+            # Preserve admin-edited fields
+            PRESERVE_FIELDS = ['account_usage', 'system_paused', 'usage_week_id', 
+                             'disabled_accounts', 'all_accounts_exhausted_alerted']
+            for field in PRESERVE_FIELDS:
+                if field in latest_state:
+                    state_dict[field] = latest_state[field]
+        except: pass
+        
         state_dict['training_lock'] = {
             'is_locked': False, 'locked_by': None,
             'locked_at': None, 'expires_at': None,
@@ -211,9 +227,48 @@ def release_lock(state_dict, reason="completed"):
 
 
 def heartbeat(state_dict, step):
+    """🛡️ Smart heartbeat — preserves account_usage and other admin fields.
+    
+    PROBLEM: Every 100 steps, the worker uploads state.json to HF.
+    But state_dict was loaded at startup — it doesn't include admin edits
+    made via the Dashboard (Edit Hours, etc).
+    
+    SOLUTION: Before uploading, fetch the LATEST state.json from HF and merge:
+    - Worker fields: current_step, current_loss, last_heartbeat, etc.
+    - Preserved fields: account_usage, system_paused, manually_set flags
+    
+    This prevents the worker from overwriting admin edits.
+    """
     try:
         state_dict['training_lock']['locked_at'] = datetime.now(timezone.utc).isoformat()
         state_dict['training_lock']['last_step'] = step
+        
+        # 🛡️ Fetch latest state from HF to preserve admin edits
+        try:
+            latest_path = hf_hub_download(repo_id=HF_REPO, filename="state.json", 
+                                          repo_type="model", token=HF_TOKEN)
+            with open(latest_path) as f:
+                latest_state = json.load(f)
+            
+            # Preserve these fields from the LATEST HF state (admin may have edited them)
+            PRESERVE_FIELDS = ['account_usage', 'system_paused', 'usage_week_id', 
+                             'disabled_accounts', 'all_accounts_exhausted_alerted']
+            for field in PRESERVE_FIELDS:
+                if field in latest_state:
+                    state_dict[field] = latest_state[field]
+                    
+            # Also preserve manually_set flags inside account_usage
+            if 'account_usage' in latest_state:
+                for uname, udata in latest_state['account_usage'].items():
+                    if udata.get('manually_set'):
+                        # Preserve manually_set values
+                        if 'account_usage' not in state_dict:
+                            state_dict['account_usage'] = {}
+                        state_dict['account_usage'][uname] = udata
+        except Exception as merge_err:
+            # Non-fatal: if merge fails, proceed with local state
+            print(f"⚠️ heartbeat merge warning (non-fatal): {merge_err}")
+        
         with open('state.json', 'w') as f: json.dump(state_dict, f, indent=2, ensure_ascii=False)
         upload_file(path_or_fileobj='state.json', path_in_repo='state.json', repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
     except: pass
@@ -479,6 +534,7 @@ if not acquire_lock():
 # 🫀 Send "I'm alive" signal IMMEDIATELY after acquiring lock
 # This lets the maestro know the notebook booted successfully,
 # BEFORE we attempt the slow checkpoint download.
+# 🛡️ Uses smart heartbeat() to preserve admin edits
 try:
     _alive_state = load_state()
     _alive_state['notebook_status'] = {
@@ -488,10 +544,9 @@ try:
     }
     _alive_state['training_lock']['last_heartbeat'] = datetime.now(timezone.utc).isoformat()
     _alive_state['training_lock']['last_step'] = _alive_state.get('current_step', 0)
-    with open('state.json', 'w') as f: json.dump(_alive_state, f, indent=2, ensure_ascii=False)
-    upload_file(path_or_fileobj='state.json', path_in_repo='state.json',
-                repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
-    log_step("✅ تم إرسال إشارة 'أنا حي' إلى state.json")
+    # 🛡️ Use smart heartbeat to preserve account_usage
+    heartbeat(_alive_state, _alive_state.get('current_step', 0))
+    log_step("✅ تم إرسال إشارة 'أنا حي' إلى state.json (مع حماية account_usage)")
 except Exception as e:
     log_step(f"⚠️ فشل إرسال إشارة 'أنا حي' (غير حرج): {e}")
 
@@ -876,6 +931,7 @@ try:
 
         # 🫀 Lightweight heartbeat every 100 steps — updates state.json only (no checkpoint upload)
         # This lets the maestro see progress even before the first SAVE_EVERY (1000 steps).
+        # 🛡️ Uses smart heartbeat() function which preserves admin edits (account_usage, etc)
         if i > 0 and i % 100 == 0:
             try:
                 state['current_step'] = step
@@ -883,9 +939,8 @@ try:
                 state['updated_at'] = datetime.now(timezone.utc).isoformat()
                 state['training_lock']['last_heartbeat'] = datetime.now(timezone.utc).isoformat()
                 state['training_lock']['last_step'] = step
-                with open('state.json', 'w') as f: json.dump(state, f, indent=2, ensure_ascii=False)
-                upload_file(path_or_fileobj='state.json', path_in_repo='state.json',
-                            repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                # 🛡️ Use smart heartbeat to preserve account_usage from admin edits
+                heartbeat(state, step)
             except Exception as e:
                 print(f"⚠️ heartbeat error (non-fatal): {e}")
 
