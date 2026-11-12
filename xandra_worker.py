@@ -731,24 +731,17 @@ def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
     if STREAMING_READY and len(TEXT_BUFFER) < 100:
         refill_text_buffer()
 
-    # Method 4: Fallback — if NO texts available, generate simple training data
-    if len(texts) == 0:
-        print("⚠️ لا توجد بيانات! استخدام بيانات احتياطية...")
-        fallback_texts = [
-            "بسم الله الرحمن الرحيم",
-            "قال الله تعالى في كتابه الكريم",
-            "الحمد لله رب العالمين",
-            "إن الله مع الصابرين",
-            "وقل رب زدني علما",
-            "وفي ذلك فليتنافس المتنافسون",
-            "كل نفس ذائقة الموت",
-            "إنما يخشى الله من عباده العلماء",
-            "ومن يتق الله يجعل له مخرجا",
-            "إن مع العسر يسرا",
-        ]
-        indices = torch.randint(0, len(fallback_texts), (batch_size,))
-        for idx in indices:
-            texts.append(fallback_texts[idx])
+    # Method 4: الانتظار وإعادة المحاولة من السحابة (ممنوع استخدام بيانات احتياطية مكررة)
+    while len(texts) == 0:
+        print("⏳ انتظار تعبئة البيانات من المستودعات السحابية...")
+        refill_text_buffer()
+        if len(TEXT_BUFFER) > 0:
+            indices = torch.randint(0, len(TEXT_BUFFER), (batch_size,))
+            for idx in indices:
+                texts.append(TEXT_BUFFER[idx])
+        else:
+            time.sleep(10)
+
 
     # Tokenize all texts
     batch = []
