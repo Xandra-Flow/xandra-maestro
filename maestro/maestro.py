@@ -1291,19 +1291,17 @@ def main():
     #   - If user manually set hours via Dashboard → respect it (max with weekly_hours)
     #   - If account has never been edited → use weekly_hours from history
     #   - If week changed → preserve manually_set entries, reset others
-    existing_usage = state.get("account_usage", {})
-    current_week_id = datetime.now(timezone.utc).strftime("%Y-W%W")
-    saved_week_id = state.get("usage_week_id")
+    now_utc = datetime.now(timezone.utc)
+    days_since_saturday = (now_utc.weekday() + 2) % 7
+    saturday_start = (now_utc - timedelta(days=days_since_saturday)).strftime("%Y-%m-%d")
+    current_week_id = f"kaggle-week-{saturday_start}"
     
-    # If week changed: reset only NON-manually-set entries
+    saved_week_id = state.get("usage_week_id")
     if saved_week_id != current_week_id:
-        print(f"📅 بدء أسبوع جديد ({current_week_id}) — إعادة ضبط الساعات غير المخصصة يدوياً")
-        new_existing = {}
-        for uname, udata in existing_usage.items():
-            if udata.get("manually_set"):
-                new_existing[uname] = udata  # preserve user-set values
-            # else: don't copy — will be re-computed from history
-        existing_usage = new_existing
+        print(f"📅 تجددت باقة كاجل الأسبوعية ({current_week_id}) — تصفير أرصدة جميع الحسابات إلى 30 ساعة!")
+        existing_usage = {}
+    else:
+        existing_usage = state.get("account_usage", {})
     
     state["usage_week_id"] = current_week_id
 
