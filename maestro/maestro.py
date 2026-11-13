@@ -105,7 +105,7 @@ else:
 WEEKLY_GPU_LIMIT_PER_ACCOUNT = 30
 LOCK_TIMEOUT_HOURS = 12          # safety net only; real status checked each cycle
 MAX_LOCK_STALE_HOURS = 14        # if lock older than this AND kernel is dead → force release
-MIN_HOURS_BETWEEN_SESSIONS = 0   # 0 because we now rely on real-time kernel status
+MIN_HOURS_BETWEEN_SESSIONS = 2.0  # فاصل راحة ساعتين بين الجلسات لحماية الحسابات
 
 
 def send_email(subject, body):
@@ -1273,7 +1273,20 @@ def main():
         print("⏸️ النظام متوقف مؤقتاً من لوحة التحكم (system_paused=True) — لن يتم إطلاق أي جلسات.")
         return
 
+    last_lock = state.get("training_lock", {})
+    released_at = last_lock.get("released_at")
+    if released_at and MIN_HOURS_BETWEEN_SESSIONS > 0:
+        try:
+            rel_time = datetime.fromisoformat(released_at.replace("Z", "+00:00"))
+            hours_passed = (datetime.now(timezone.utc) - rel_time).total_seconds() / 3600
+            if hours_passed < MIN_HOURS_BETWEEN_SESSIONS:
+                print(f"🛡️ فترة راحة آمنة نشطة: مر {hours_passed:.2f}h من أصل {MIN_HOURS_BETWEEN_SESSIONS}h — انتظار لحماية الحسابات.")
+                return
+        except Exception:
+            pass
+
     # Step 1: refresh kernel status map (this is the key upgrade)
+
     print("\n📡 تحديث خريطة حالة الـ kernels من Kaggle...")
     state = update_kernel_status_map(state)
 
