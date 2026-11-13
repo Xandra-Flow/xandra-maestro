@@ -1332,8 +1332,13 @@ def main():
             }
     
     # Then: add/update accounts from account_stats
+    disabled_accounts = state.get("disabled_accounts", [])
     for s in account_stats:
         uname = s["username"]
+        if uname in disabled_accounts:
+            if uname in existing_usage:
+                usage_map[uname] = existing_usage[uname]
+            continue
         prev = existing_usage.get(uname, {})
         prev_used = prev.get("used", 0)
         prev_manually_set = prev.get("manually_set", False)
