@@ -1314,7 +1314,8 @@ def main():
                 "remaining": udata.get("remaining", 30),
                 "sessions": udata.get("sessions", 0),
                 "manually_set": True,
-                "manually_set_at": udata.get("manually_set_at")
+                "manually_set_at": udata.get("manually_set_at"),
+                "manual_base_used": udata.get("manual_base_used", udata.get("used", 0))
             }
     
     # Then: add/update accounts from account_stats
@@ -1323,25 +1324,28 @@ def main():
         prev = existing_usage.get(uname, {})
         prev_used = prev.get("used", 0)
         prev_manually_set = prev.get("manually_set", False)
-        
-        # If manually set, use max(manually_set_value, weekly_hours)
-        # If not, use weekly_hours from history (or prev_used if week didn't change)
         weekly_hours = s.get("weekly_hours", 0)
+        base_manual = prev.get("manual_base_used", prev_used)
         
         if prev_manually_set:
-            # Respect manual value, but also account for any new sessions this week
-            total_used = round(max(prev_used, weekly_hours), 2)
+            manual_time = prev.get("manually_set_at") or "0000"
+            new_sessions_hours = 0
+            for sess in state.get("history", []):
+                if uname in sess.get("worker_id", "") and sess.get("timestamp", "") > manual_time:
+                    new_sessions_hours += sess.get("gpu_hours", 0)
+            total_used = round(base_manual + new_sessions_hours, 2)
         else:
-            # Use max of prev_used (preserved from last run) and weekly_hours
             total_used = round(max(prev_used, weekly_hours), 2)
-        
+
         usage_map[uname] = {
             "used": total_used,
             "remaining": round(max(0, 30.0 - total_used), 2),
             "sessions": max(prev.get("sessions", 0), s.get("sessions", 0)),
             "manually_set": prev_manually_set,
-            "manually_set_at": prev.get("manually_set_at")
+            "manually_set_at": prev.get("manually_set_at"),
+            "manual_base_used": base_manual if prev_manually_set else None
         }
+
     state["account_usage"] = usage_map
 
  
