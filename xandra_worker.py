@@ -680,28 +680,38 @@ else:
 
 # Buffer to cache texts from streaming (avoids re-iterating exhausted streams)
 TEXT_BUFFER = []
-BUFFER_SIZE = 500  # cache 500 texts from the stream
+BUFFER_SIZE = 2500
+STREAM_ITER = None
 
 def refill_text_buffer():
-    """Refills the text buffer from the streaming dataset."""
-    global TEXT_BUFFER, stream_iter
+    """يسحب دفعة جديدة بالتسلسل دون إعادة الاتصال من البداية أو تكرار أوائل الملفات."""
+    global TEXT_BUFFER, STREAM_ITER
     if not STREAMING_READY:
         return
     try:
-        # Recreate iterator if exhausted
-        stream_iter = iter(combined_stream)
+        if STREAM_ITER is None:
+            shuffled = combined_stream.shuffle(seed=int(time.time()), buffer_size=5000)
+            STREAM_ITER = iter(shuffled)
+        
+        # تفريغ النصوص القديمة المستهلكة قبل تعبئة نصوص جديدة تماماً
+        TEXT_BUFFER.clear()
         count = 0
-        for item in stream_iter:
-            if count >= BUFFER_SIZE:
-                break
-            text = item.get('text', item.get('content', item.get('nass', '')))
-            if text and len(str(text)) > 50:
-                TEXT_BUFFER.append(str(text))
-                count += 1
+        while count < BUFFER_SIZE:
+            try:
+                item = next(STREAM_ITER)
+                text = item.get('text', item.get('content', item.get('nass', '')))
+                if text and len(str(text)) > 50:
+                    TEXT_BUFFER.append(str(text))
+                    count += 1
+            except StopIteration:
+                shuffled = combined_stream.shuffle(seed=int(time.time()), buffer_size=5000)
+                STREAM_ITER = iter(shuffled)
         if count > 0:
-            print(f"📦 تم تعبئة الـ buffer بـ {count} نص من الـ stream")
+            print(f"📦 تم تعبئة الـ buffer بـ {count} نص جديد ومتنوع من الـ stream")
     except Exception as e:
         print(f"⚠️ فشل تعبئة الـ buffer: {e}")
+        STREAM_ITER = None
+
 
 # Initial fill
 if STREAMING_READY:
