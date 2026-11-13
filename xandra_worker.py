@@ -442,21 +442,20 @@ class XandraModern(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-        B, T = idx.shape
-        x = self.tok_emb(idx)
-        x = self.emb_norm(x)
-
+        x = self.emb_norm(self.tok_emb(idx))
         for block in self.blocks:
             x = block(x)
-
         x = self.norm(x)
         logits = self.head(x)
-
         loss = None
         if targets is not None:
+            # إزاحة التوقعات والأهداف خطوة واحدة للتنبؤ بالتوكن التالي (Next-Token Prediction)
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = targets[..., 1:].contiguous()
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                targets.view(-1)
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -100
             )
         return logits, loss
 
