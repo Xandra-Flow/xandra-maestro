@@ -1336,8 +1336,10 @@ def main():
     for s in account_stats:
         uname = s["username"]
         if uname in disabled_accounts:
-            if uname in existing_usage:
-                usage_map[uname] = existing_usage[uname]
+            usage_map[uname] = existing_usage.get(uname, {
+                "used": 0, "remaining": 30.0, "sessions": 0,
+                "manually_set": False, "manually_set_at": None, "manual_base_used": None
+            })
             continue
         prev = existing_usage.get(uname, {})
         prev_used = prev.get("used", 0)
