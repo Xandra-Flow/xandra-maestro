@@ -105,7 +105,7 @@ else:
 WEEKLY_GPU_LIMIT_PER_ACCOUNT = 30
 LOCK_TIMEOUT_HOURS = 12          # safety net only; real status checked each cycle
 MAX_LOCK_STALE_HOURS = 14        # if lock older than this AND kernel is dead → force release
-MIN_HOURS_BETWEEN_SESSIONS = 2.0  # فاصل راحة ساعتين بين الجلسات لحماية الحسابات
+MIN_HOURS_BETWEEN_SESSIONS = 0.25  # 15 دقيقة فقط للتبديل السريع بين الجلسات
 
 
 def send_email(subject, body):
