@@ -1,4 +1,4 @@
-["""
+"""
 ╔═══════════════════════════════════════════════════════════════╗
 ║   Xandra Hope - Maestro (Real-time Discovery + Smart Lock)    ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
