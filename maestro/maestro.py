@@ -1,4 +1,4 @@
-"""
+["""
 ╔═══════════════════════════════════════════════════════════════╗
 ║   Xandra Hope - Maestro (Real-time Discovery + Smart Lock)    ║
 ║   Copyright (c) 2026 Ahmed Sayed Kamel Mahmoud &               ║
@@ -393,74 +393,60 @@ def verify_kaggle_auth(account):
 
 def check_kaggle_kernel_status(account):
     """
-    Queries Kaggle REST API directly for the status of xandra-worker notebook.
-    Uses GET /api/v1/kernels/status?user_name={username} which returns a list
-    of all kernels for the user with their current status.
-
-    This bypasses kaggle CLI entirely — no auth issues, no env vars, no file paths.
-
-    Returns one of:
-        'running'   → notebook is actively training
-        'complete'  → notebook finished successfully
-        'error'     → notebook crashed or errored out
-        'canceled'  → notebook was canceled manually
-        'not_found' → no notebook exists yet (fresh account)
-        'unknown'   → could not determine (network/auth error)
+    استشعار حقيقي لحالة الدفتر على خادم كاجل باستخدام CLI الرسمي أولاً ثم REST API.
+    يرجع: 'running' (تشمل queued), 'complete', 'error', 'canceled', 'not_found', أو 'unknown_via_lock'
     """
     username = account["username"]
+    kernel_slug = f"{username}/xandra-worker"
 
-    # Call the REST API directly
-    code, data = kaggle_api_get(
-        account,
-        "kernels/status",
-        params={"user_name": username}
-    )
+    # 1. الفحص المباشر عبر Kaggle CLI الرسمي (يعمل مع توكنات KGAT_ الحديثة بدقة)
+    try:
+        env = dict(os.environ)
+        key_val = (account.get("key") or account.get("api_token") or "").strip()
+        if key_val.startswith("KGAT_"):
+            env["KAGGLE_API_TOKEN"] = key_val
+        env["KAGGLE_USERNAME"] = username
+        if account.get("key"):
+            env["KAGGLE_KEY"] = account["key"]
 
-    # Handle auth failures
-    if code == 401:
-        print(f"   ❌ فشل المصادقة لـ {username} (HTTP 401) — تحقق من الـ credentials في GitHub Secrets")
-        return "unknown"
+        res = subprocess.run(
+            ["kaggle", "kernels", "status", kernel_slug],
+            env=env, capture_output=True, text=True, timeout=25
+        )
+        out = (res.stdout + " " + res.stderr).lower()
+        if "running" in out or "queued" in out or "inprogress" in out:
+            return "running"
+        if "complete" in out or "finished" in out:
+            return "complete"
+        if "error" in out or "failed" in out:
+            return "error"
+        if "cancel" in out:
+            return "canceled"
+        if "404" in out or "not found" in out:
+            return "not_found"
+    except Exception as e:
+        print(f"   ⚠️ تعذر فحص CLI لـ {username}: {e}")
+
+    # 2. المسار الاحتياطي عبر REST API
+    code, data = kaggle_api_get(account, "kernels/status", params={"user_name": username})
     if code == 403:
-        # 403 on kernels/status endpoint is common — it often means the endpoint
-        # is restricted even with valid tokens. We treat this as "uncertain" rather
-        # than blocking the account. The actual kernel push will work fine.
-        # We use the lock state in state.json as the source of truth instead.
-        print(f"   ℹ️ {username}: kernels/status رجع 403 (endpoint محدود) — سيُستخدم حالة القفل من state.json")
         return "unknown_via_lock"
-    if code in (-1, -2):
-        print(f"   ⚠️ خطأ شبكة/اتصال لـ {username}")
-        return "unknown"
     if code != 200 or not data:
-        print(f"   ⚠️ استجابة غير متوقعة لـ {username}: HTTP {code}")
         return "unknown"
 
-    # Parse the response — looking for our xandra-worker kernel
-    # The response format is: {"status": [{"id": "...", "status": "...", ...}, ...]}
-    # or sometimes just a list
     kernels = data if isinstance(data, list) else data.get("status", data.get("kernels", []))
-    if not isinstance(kernels, list):
-        kernels = []
-
-    # Look for our kernel by slug/ref/title
-    target_slugs = ["xandra-worker", "xandraworker", "xandra_worker"]
-    for k in kernels:
-        ref = (k.get("ref") or k.get("slug") or k.get("title") or "").lower()
-        # Check if this kernel matches one of our target slugs
-        if any(s in ref for s in target_slugs):
-            status = (k.get("status") or k.get("state") or "").lower()
-            if status in ("running", "runinprogress", "in_progress", "inprogress", "queued", "in queue"):
+    for k in (kernels if isinstance(kernels, list) else []):
+        ref = (k.get("ref") or k.get("slug") or "").lower()
+        if "xandra-worker" in ref or "xandra_worker" in ref:
+            st = (k.get("status") or k.get("state") or "").lower()
+            if st in ("running", "runinprogress", "in_progress", "queued", "in queue"):
                 return "running"
-            if status in ("complete", "finished", "success", "done"):
+            if st in ("complete", "finished", "success"):
                 return "complete"
-            if status in ("error", "failed", "failure"):
+            if st in ("error", "failed"):
                 return "error"
-            if status in ("cancelled", "canceled"):
+            if st in ("cancelled", "canceled"):
                 return "canceled"
-            # Found our kernel but status is unrecognized
-            print(f"   📝 حالة غير معروفة لـ {username}: {status}")
-            return "unknown"
-
-    # No matching kernel found — this is a fresh account
     return "not_found"
 
 
@@ -1293,6 +1279,20 @@ def main():
 
     # Step 2: compute session gaps for the dashboard
     compute_session_gaps(state)
+
+    # حارس الاستشعار المسبق: فحص آخر حساب عمل في السجل والتأكد من أنه أنهى مهمته بالكامل
+    last_history = state.get("history", [])
+    if last_history:
+        last_worker = last_history[-1].get("worker_id", "")
+        last_acc_name = extract_account_name(last_worker)
+        last_acc_obj = next((a for a in KAGGLE_ACCOUNTS if a["username"] == last_acc_name), None)
+        if last_acc_obj:
+            real_last_status = check_kaggle_kernel_status(last_acc_obj)
+            print(f"🔍 استشعار آخر خادم ({last_acc_name}): الحالة الفعلية = {real_last_status}")
+            if real_last_status == "running":
+                print(f"🛑 الخادم السابق ({last_acc_name}) ما زال يعمل أو في طابور الانتظار — لن يتم فتح أي حساب جديد!")
+                update_state(state)
+                return
 
     # Step 3: report account statuses
     print("\n📊 تقرير الحسابات:")
