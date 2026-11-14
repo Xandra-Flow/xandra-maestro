@@ -240,7 +240,8 @@ def heartbeat(state_dict, step):
     This prevents the worker from overwriting admin edits.
     """
     try:
-        state_dict['training_lock']['locked_at'] = datetime.now(timezone.utc).isoformat()
+        state_dict['training_lock']['locked_at'] = SESSION_STARTED_AT
+        state_dict['training_lock']['last_heartbeat'] = datetime.now(timezone.utc).isoformat()
         state_dict['training_lock']['last_step'] = step
         
         # 🛡️ Fetch latest state from HF to preserve admin edits
