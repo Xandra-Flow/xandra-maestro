@@ -549,7 +549,7 @@ def check_lock(state):
                     try:
                         hb_time = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
                         mins_since_hb = (now - hb_time).total_seconds() / 60
-                        if mins_since_hb > 25:
+                        if mins_since_hb > 60:
                             print(f"⚠️ توقفت نبضات العامل منذ {mins_since_hb:.1f} دقيقة — تحرير القفل")
                             return False, "heartbeat_timeout"
                         else:
