@@ -132,7 +132,7 @@ BATCH_SIZE = 8                # safe for Kaggle GPU (was 48 — too big, caused 
 MAX_LEN = 512                  # 🚀 2x longer context with RoPE!
 LEARNING_RATE = 3e-4
 SAVE_EVERY = 1000
-MAX_TIME_MINUTES = 650
+MAX_TIME_MINUTES = 570  # 9:30 ساعات بالضبط للاستفادة المثلى من باقة الـ 30 ساعة
 GRAD_ACCUM_STEPS = 16           # effective batch = 192
 USE_MIXED_PRECISION = True
 USE_TORCH_COMPILE = False      # Disabled — can fail on Kaggle environment
