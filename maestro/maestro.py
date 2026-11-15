@@ -918,12 +918,14 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
                 "kernel_type": "script",
                 "is_private": "true",
                 "enable_gpu": "true",
+                "accelerator": "GpuNvidiaTeslaT4",
                 "enable_internet": "true",
                 "dataset_sources": [],
                 "kernel_sources": [],
                 "competition_sources": [],
                 "model_sources": []
             }
+            
             metadata_path = _os.path.join(work_dir, "kernel-metadata.json")
             with open(metadata_path, "w") as f:
                 _json.dump(metadata, f, indent=2)
