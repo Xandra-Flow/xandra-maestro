@@ -594,17 +594,21 @@ if USE_CONTINUAL_PRETRAINING:
         print(f"   Resuming from step {last_step:,}")
 
 else:
-    # Train from scratch (original path)
-    model = XandraModern().to(device)
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"\n🧠 Model: XandraModern (training from scratch)")
-    print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
-
+    # تحميل الإعدادات الديناميكية أولاً قبل بناء المعمارية وطابور البيانات
     state = load_state()
     sys_cfg = state.get("system_settings", {})
     MAX_TIME_MINUTES = int(sys_cfg.get("max_time_minutes", MAX_TIME_MINUTES))
     LEARNING_RATE = float(sys_cfg.get("learning_rate", LEARNING_RATE))
     MAX_STEPS = int(state.get("target_steps", MAX_STEPS))
+    BATCH_SIZE = int(sys_cfg.get("batch_size", BATCH_SIZE))
+    MAX_LEN = int(sys_cfg.get("max_len", MAX_LEN))
+
+    # Train from scratch (original path)
+    model = XandraModern(max_seq_len=MAX_LEN).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"\n🧠 Model: XandraModern (training from scratch)")
+    print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
+
     last_step = load_checkpoint_smart(model)
 
     from transformers import AutoTokenizer
