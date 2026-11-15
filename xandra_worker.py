@@ -601,10 +601,15 @@ else:
     print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
 
     state = load_state()
+    sys_cfg = state.get("system_settings", {})
+    MAX_TIME_MINUTES = int(sys_cfg.get("max_time_minutes", MAX_TIME_MINUTES))
+    LEARNING_RATE = float(sys_cfg.get("learning_rate", LEARNING_RATE))
+    MAX_STEPS = int(state.get("target_steps", MAX_STEPS))
     last_step = load_checkpoint_smart(model)
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
+
 
 # ═══════════════════════════════════════════════════════════════
 # 📖 Data Loading — embedded sources + smart fallbacks
