@@ -908,8 +908,9 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
             with open(dest_path, "w") as f:
                 f.write(worker_code)
             
-            # 2. Create kernel-metadata.json
-            #    Per https://github.com/Kaggle/kaggle-api/wiki/Kernel-Metadata
+            # 2. Create kernel-metadata.json (يقرأ نوع الكرت من إعدادات اللوحة)
+            sys_cfg = get_state().get("system_settings", {})
+            accel_choice = sys_cfg.get("accelerator", "GpuNvidiaTeslaT4")
             metadata = {
                 "id": f"{username}/xandra-worker",
                 "title": "xandra-worker",
@@ -918,13 +919,14 @@ def push_kaggle_kernel_via_cli(account, worker_code_path):
                 "kernel_type": "script",
                 "is_private": "true",
                 "enable_gpu": "true",
-                "accelerator": "GpuNvidiaTeslaT4",
+                "accelerator": accel_choice,
                 "enable_internet": "true",
                 "dataset_sources": [],
                 "kernel_sources": [],
                 "competition_sources": [],
                 "model_sources": []
             }
+
             
             metadata_path = _os.path.join(work_dir, "kernel-metadata.json")
             with open(metadata_path, "w") as f:
@@ -1261,17 +1263,19 @@ def main():
         print("⏸️ النظام متوقف مؤقتاً من لوحة التحكم (system_paused=True) — لن يتم إطلاق أي جلسات.")
         return
 
+    cooldown_hrs = state.get("system_settings", {}).get("cooldown_hours", MIN_HOURS_BETWEEN_SESSIONS)
     last_lock = state.get("training_lock", {})
     released_at = last_lock.get("released_at")
-    if released_at and MIN_HOURS_BETWEEN_SESSIONS > 0:
+    if released_at and cooldown_hrs > 0:
         try:
             rel_time = datetime.fromisoformat(released_at.replace("Z", "+00:00"))
             hours_passed = (datetime.now(timezone.utc) - rel_time).total_seconds() / 3600
-            if hours_passed < MIN_HOURS_BETWEEN_SESSIONS:
-                print(f"🛡️ فترة راحة آمنة نشطة: مر {hours_passed:.2f}h من أصل {MIN_HOURS_BETWEEN_SESSIONS}h — انتظار لحماية الحسابات.")
+            if hours_passed < cooldown_hrs:
+                print(f"🛡️ فترة راحة آمنة نشطة: مر {hours_passed:.2f}h من أصل {cooldown_hrs}h — انتظار لحماية الحسابات.")
                 return
         except Exception:
             pass
+
 
     # Step 1: refresh kernel status map (this is the key upgrade)
 
