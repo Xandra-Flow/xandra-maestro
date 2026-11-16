@@ -58,7 +58,6 @@ def main():
             tree = api.list_repo_tree(repo_id=repo_id, repo_type="dataset", recursive=True, token=HF_TOKEN)
             repo_bytes = 0
             data_files = 0
-            file_types = {}
 
             for item in tree:
                 if hasattr(item, "size") and item.size:
@@ -66,16 +65,12 @@ def main():
                     if path.startswith(".git"):
                         continue
                     repo_bytes += item.size
-                    ext = os.path.splitext(path)[1].lower() or "other"
-                    file_types[ext] = file_types.get(ext, 0) + 1
+                    ext = os.path.splitext(path).lower() or "other"
                     if ext in (".parquet", ".jsonl", ".json", ".txt", ".csv", ".md"):
                         data_files += 1
 
-            # تقدير عدد الوثائق من حجم البيانات (متوسط ~2.5 كيلوبايت لكل وثيقة/مقطع)
             est_docs = int(repo_bytes / 2500)
 
-            # أخذ عينة سريعة لتصنيف نوع المعرفة داخل المستودع
-            repo_domains = {}
             try:
                 ds = load_dataset(repo_id, split="train", streaming=True, token=HF_TOKEN)
                 for idx, row in enumerate(ds):
@@ -84,7 +79,6 @@ def main():
                     txt = str(row.get("text") or row.get("content") or row.get("instruction") or "")
                     if len(txt) > 30:
                         dom = classify_text(txt[:1500])
-                        repo_domains[dom] = repo_domains.get(dom, 0) + 1
                         domain_counts[dom] = domain_counts.get(dom, 0) + 1
                         sample_total += 1
             except Exception as e:
@@ -100,17 +94,14 @@ def main():
                 "size_bytes": repo_bytes,
                 "size_formatted": format_size(repo_bytes),
                 "data_files_count": data_files,
-                "estimated_docs": est_docs,
-                "file_types": file_types,
-                "top_domains": repo_domains
+                "estimated_docs": est_docs
             })
         except Exception as e:
             print(f"❌ فشل فحص {repo_id}: {e}")
 
     report["total_size_formatted"] = format_size(report["total_size_bytes"])
 
-    # حساب النسب المئوية والحجم التقديري لكل مجال معرفي
-    for dom, cnt in sorted(domain_counts.items(), key=lambda x: -x[1]):
+    for dom, cnt in sorted(domain_counts.items(), key=lambda x: -x):
         pct = round((cnt / sample_total) * 100, 1) if sample_total > 0 else 0
         est_dom_bytes = int(report["total_size_bytes"] * (pct / 100.0))
         est_dom_docs = int(report["total_estimated_docs"] * (pct / 100.0))
@@ -130,7 +121,7 @@ def main():
         repo_type="model",
         token=HF_TOKEN
     )
-    print("✅ تم تحديث ورفع تقرير المعرفة corpus_stats.json بنجاح!")
+    print("✅ تم رفع تقرير المعرفة corpus_stats.json بنجاح!")
 
 if __name__ == "__main__":
     main()
