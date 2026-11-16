@@ -611,6 +611,12 @@ else:
 
     last_step = load_checkpoint_smart(model)
 
+    # 🚀 تفعيل الكرتين معاً تلقائياً في حال اختيار T4 x2
+    if torch.cuda.device_count() > 1:
+        print(f"🔥 تم اكتشاف {torch.cuda.device_count()} كروت شاشة! تفعيل المعالجة المتوازية (DataParallel)...")
+        model = nn.DataParallel(model)
+        BATCH_SIZE = BATCH_SIZE * torch.cuda.device_count()  # مضاعفة الدفعة إلى 16 (8 لكل كرت)
+
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
 
@@ -916,9 +922,12 @@ try:
             print(f"⚠️ تخطّي batch بسبب خطأ: {e}")
             continue
 
-        # 🚀 Mixed Precision forward
-        with torch.amp.autocast('cuda', enabled=USE_MIXED_PRECISION, dtype=torch.bfloat16):
+        # 🚀 Mixed Precision forward (اختيار float16 تلقائياً لكروت T4 لتفعيل Tensor Cores)
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        with torch.amp.autocast('cuda', enabled=USE_MIXED_PRECISION, dtype=amp_dtype):
             logits, loss = model(batch, targets=batch)
+            if loss.ndim > 0:
+                loss = loss.mean()  # تجميع متوسط الخسارة القادمة من الكرتين
             loss = loss / GRAD_ACCUM_STEPS
 
         scaler.scale(loss).backward()
@@ -938,7 +947,7 @@ try:
         if i % 10 == 0:
             avg_loss = sum(losses[-10:]) / min(10, len(losses))
             elapsed_min = (time.time() - start_time) / 60
-            steps_per_min = step / max(elapsed_min, 0.01)
+            steps_per_min = len(losses) / max(elapsed_min, 0.01)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Step {step:,} | loss: {loss.item()*GRAD_ACCUM_STEPS:.4f} | avg: {avg_loss:.4f} | {steps_per_min:.1f} steps/min")
 
         # 🫀 Lightweight heartbeat every 100 steps — updates state.json only (no checkpoint upload)
@@ -958,8 +967,10 @@ try:
 
         if i % SAVE_EVERY == 0 and i > 0:
             try:
-                # Handle torch.compile wrapper
-                model_state = model.state_dict() if not hasattr(model, '_orig_mod') else model._orig_mod.state_dict()
+                # استخراج الأوزان النظيفة سواء كان كرتاً واحداً أو كرتين (DataParallel)
+                raw_model = model.module if hasattr(model, 'module') else model
+                raw_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
+                model_state = raw_model.state_dict()
                 checkpoint = {
                     'model_state': model_state,
                     'optimizer_state': optimizer.state_dict(),
@@ -1026,7 +1037,10 @@ finally:
         if losses:
             final_loss = losses[-1]
             try:
-                model_state = model.state_dict() if not hasattr(model, '_orig_mod') else model._orig_mod.state_dict()
+                # استخراج الأوزان النظيفة عند إنهاء الجلسة
+                raw_model = model.module if hasattr(model, 'module') else model
+                raw_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
+                model_state = raw_model.state_dict()
                 checkpoint = {
                     'model_state': model_state,
                     'optimizer_state': optimizer.state_dict(),
@@ -1077,7 +1091,7 @@ finally:
 
         print(f"\n✅ انتهت الجلسة. الخطوة النهائية: {step:,}")
         print(f"⏱️ زمن الجلسة: {(time.time() - SESSION_START_TIME)/3600:.2f} ساعة")
-        print(f"📊 متوسط الخطوة/دقيقة: {step / max((time.time() - SESSION_START_TIME)/60, 0.01):.1f}")
+        print(f"📊 متوسط الخطوة/دقيقة: {len(losses) / max((time.time() - SESSION_START_TIME)/60, 0.01):.1f}")
         print(f"🔒 تم تحرير القفل.")
     except Exception as e:
         print(f"🚨 خطأ كارثي في finally: {e}")
