@@ -101,7 +101,7 @@ def main():
 
     report["total_size_formatted"] = format_size(report["total_size_bytes"])
 
-    for dom, cnt in sorted(domain_counts.items(), key=lambda x: -x):
+    for dom, cnt in sorted(domain_counts.items(), key=lambda x: x[1], reverse=True):
         pct = round((cnt / sample_total) * 100, 1) if sample_total > 0 else 0
         est_dom_bytes = int(report["total_size_bytes"] * (pct / 100.0))
         est_dom_docs = int(report["total_estimated_docs"] * (pct / 100.0))
