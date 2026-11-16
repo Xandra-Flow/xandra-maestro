@@ -65,7 +65,7 @@ def main():
                     if path.startswith(".git"):
                         continue
                     repo_bytes += item.size
-                    ext = os.path.splitext(path).lower() or "other"
+                    ext = os.path.splitext(path)[1].lower() or "other"
                     if ext in (".parquet", ".jsonl", ".json", ".txt", ".csv", ".md"):
                         data_files += 1
 
