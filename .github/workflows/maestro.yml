@@ -3,7 +3,7 @@ name: Xandra Maestro
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 # مطلوب للحصول على صلاحية dispatch للـ PAT المستخدم في Cloudflare Worker
