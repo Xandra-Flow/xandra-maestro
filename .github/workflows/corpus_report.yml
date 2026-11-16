@@ -1,10 +1,8 @@
 name: Update Xandra Corpus Report
 
 on:
-  # التشغيل التلقائي كل يوم أحد الساعة 00:00 بتوقيت UTC (مرة أسبوعياً)
   schedule:
     - cron: "0 0 * * 0"
-  # يتيح لك تشغيله يدوياً في أي لحظة بضغطة زر من تبويب Actions
   workflow_dispatch: {}
 
 jobs:
@@ -13,19 +11,18 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: 📥 سحب ملفات المستودع
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 إعداد بيئة بايثون
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 تثبيت المكتبات المطلوبة
-        run: |
-          pip install -q huggingface_hub datasets
+      - name: 📦 Install dependencies
+        run: pip install -q huggingface_hub datasets
 
-      - name: 📊 تشغيل جرد وتصنيف المستودعات
+      - name: 📊 Run Corpus Analyzer
         env:
           HF_REPO: ${{ secrets.HF_REPO }}
           HF_TOKEN_OWNER: ${{ secrets.HF_TOKEN_OWNER }}
