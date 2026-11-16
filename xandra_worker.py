@@ -602,6 +602,8 @@ else:
     MAX_STEPS = int(state.get("target_steps", MAX_STEPS))
     BATCH_SIZE = int(sys_cfg.get("batch_size", BATCH_SIZE))
     MAX_LEN = int(sys_cfg.get("max_len", MAX_LEN))
+    PRECISION_MODE = sys_cfg.get("precision_mode", "auto")
+    DATA_PARALLEL_MODE = sys_cfg.get("data_parallel", "auto")
 
     # Train from scratch (original path)
     model = XandraModern(max_seq_len=MAX_LEN).to(device)
@@ -611,11 +613,15 @@ else:
 
     last_step = load_checkpoint_smart(model)
 
-    # 🚀 تفعيل الكرتين معاً تلقائياً في حال اختيار T4 x2
-    if torch.cuda.device_count() > 1:
-        print(f"🔥 تم اكتشاف {torch.cuda.device_count()} كروت شاشة! تفعيل المعالجة المتوازية (DataParallel)...")
+    # 🚀 التحكم في التوزيع المتوازي بناءً على إعدادات لوحة التحكم
+    gpu_count = torch.cuda.device_count()
+    use_dp = (DATA_PARALLEL_MODE == "enabled" and gpu_count > 1) or (DATA_PARALLEL_MODE == "auto" and gpu_count > 1)
+    if use_dp:
+        print(f"🔥 تفعيل المعالجة المتوازية (DataParallel) على {gpu_count} كروت شاشة!")
         model = nn.DataParallel(model)
-        BATCH_SIZE = BATCH_SIZE * torch.cuda.device_count()  # مضاعفة الدفعة إلى 16 (8 لكل كرت)
+        BATCH_SIZE = BATCH_SIZE * gpu_count
+    else:
+        print(f"🖥️ العمل على كرت واحد (الوضع: {DATA_PARALLEL_MODE} | الكروت المتاحة: {gpu_count})")
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct', use_fast=True)
@@ -922,9 +928,22 @@ try:
             print(f"⚠️ تخطّي batch بسبب خطأ: {e}")
             continue
 
-        # 🚀 Mixed Precision forward (اختيار float16 تلقائياً لكروت T4 لتفعيل Tensor Cores)
-        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        with torch.amp.autocast('cuda', enabled=USE_MIXED_PRECISION, dtype=amp_dtype):
+        # 🚀 Mixed Precision forward بناءً على اختيار لوحة التحكم
+        if PRECISION_MODE == "float16":
+            amp_dtype = torch.float16
+            use_amp = True
+        elif PRECISION_MODE == "bfloat16":
+            amp_dtype = torch.bfloat16
+            use_amp = True
+        elif PRECISION_MODE == "float32":
+            amp_dtype = torch.float32
+            use_amp = False
+        else:  # auto
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            use_amp = USE_MIXED_PRECISION
+
+        with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+
             logits, loss = model(batch, targets=batch)
             if loss.ndim > 0:
                 loss = loss.mean()  # تجميع متوسط الخسارة القادمة من الكرتين
