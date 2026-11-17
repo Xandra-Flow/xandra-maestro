@@ -8,6 +8,10 @@ on:
         required: false
         default: '500'
 
+concurrency:
+  group: xandra-distillation-lock
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
