@@ -597,21 +597,52 @@ else:
     # تحميل الإعدادات الديناميكية أولاً قبل بناء المعمارية وطابور البيانات
     state = load_state()
     sys_cfg = state.get("system_settings", {})
+    TRAINING_STAGE = sys_cfg.get("training_stage", "stage1_pretrain")
     MAX_TIME_MINUTES = int(sys_cfg.get("max_time_minutes", MAX_TIME_MINUTES))
     LEARNING_RATE = float(sys_cfg.get("learning_rate", LEARNING_RATE))
     MAX_STEPS = int(state.get("target_steps", MAX_STEPS))
     BATCH_SIZE = int(sys_cfg.get("batch_size", BATCH_SIZE))
+    GRAD_ACCUM_STEPS = int(sys_cfg.get("grad_accum_steps", GRAD_ACCUM_STEPS))
     MAX_LEN = int(sys_cfg.get("max_len", MAX_LEN))
     PRECISION_MODE = sys_cfg.get("precision_mode", "auto")
     DATA_PARALLEL_MODE = sys_cfg.get("data_parallel", "auto")
 
-    # Train from scratch (original path)
-    model = XandraModern(max_seq_len=MAX_LEN).to(device)
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"\n🧠 Model: XandraModern (training from scratch)")
-    print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
-
-    last_step = load_checkpoint_smart(model)
+    hepl_telemetry = None
+    if TRAINING_STAGE == "stage2_hepl_sft":
+        import urllib.request
+        if not os.path.exists("hepl_architecture.py"):
+            gh_raw = "".join([
+                "https://", "raw.githubusercontent", ".com/",
+                "Xandra-Flow/xandra-maestro/main/",
+                "kaggle-worker/hepl_architecture.py"
+            ])
+            urllib.request.urlretrieve(gh_raw, "hepl_architecture.py")
+        from hepl_architecture import XandraHEPL, SelfHealingTelemetry, graft_from_xandra_modern
+        model = XandraHEPL(
+            vocab_size=VOCAB_SIZE, dim=MODEL_DIM, n_layers=N_LAYERS,
+            n_heads=N_HEADS, n_kv_heads=N_KV_HEADS, max_seq_len=MAX_LEN,
+            use_gradient_checkpointing=True
+        ).to(device)
+        hepl_telemetry = SelfHealingTelemetry(log_file="alerts.log")
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"\n🧠 Model: XandraHEPL (Stage 2: 4 Manifolds + Sparse Gate)")
+        print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
+        try:
+            last_step = load_checkpoint(model, timeout_seconds=180)
+        except Exception:
+            last_step = 0
+        # إذا كانت هذه أول خطوة في المرحلة 2، نفّذ النسخ الجراحي من base_150k.pt
+        if last_step <= 150000:
+            base_path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/base_150k.pt", repo_type="model", token=HF_TOKEN)
+            model = graft_from_xandra_modern(model, base_path, sigma=0.01, device=device)
+            last_step = state.get("current_step", 150000)
+    else:
+        TRAINING_STAGE = "stage1_pretrain"
+        model = XandraModern(max_seq_len=MAX_LEN).to(device)
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"\n🧠 Model: XandraModern (Stage 1: Base Pre-training)")
+        print(f"   Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
+        last_step = load_checkpoint_smart(model)
 
     # 🚀 التحكم في التوزيع المتوازي بناءً على إعدادات لوحة التحكم
     gpu_count = torch.cuda.device_count()
@@ -634,7 +665,16 @@ else:
 # (which the maestro does NOT upload to Kaggle).
 
 print("\n📖 تحميل مصادر التدريب...")
-sources_config = {
+if TRAINING_STAGE == "stage2_hepl_sft":
+    sources_config = {
+        "sources": [
+            {"name": "Xandra-SFT-Corpus", "type": "stream",
+             "path": "smart-force/xandra-sft-corpus",
+             "split": "train", "field": "text", "weight": 1.0}
+        ]
+    }
+else:
+    sources_config = {
     "sources": [
         {"name": "Shamela", "type": "stream",
          "path": "ReligiousLLMs/shamela_all_diacritized_fully",
@@ -644,16 +684,17 @@ sources_config = {
          "split": "train", "field": "text", "weight": 0.5},
     ]
 }
-# Try loading external config directly from HuggingFace Cloud
-try:
-    sources_path = hf_hub_download(repo_id=HF_REPO, filename="training_sources.json", repo_type="model", token=HF_TOKEN)
-    with open(sources_path, 'r', encoding='utf-8') as f:
-        external = json.load(f)
-    if external.get('sources'):
-        sources_config = external
-        print(f"   ✅ تم جلب {len(sources_config['sources'])} مصدر من السحابة (training_sources.json)")
-except Exception as e:
-    print(f"   ℹ️ تعذر جلب training_sources.json السحابي ({e}) — استخدام المصادر المدمجة")
+# Try loading external config directly from HuggingFace Cloud (Stage 1 only)
+if TRAINING_STAGE != "stage2_hepl_sft":
+    try:
+        sources_path = hf_hub_download(repo_id=HF_REPO, filename="training_sources.json", repo_type="model", token=HF_TOKEN)
+        with open(sources_path, 'r', encoding='utf-8') as f:
+            external = json.load(f)
+        if external.get('sources'):
+            sources_config = external
+            print(f"   ✅ تم جلب {len(sources_config['sources'])} مصدر من السحابة (training_sources.json)")
+    except Exception as e:
+        print(f"   ℹ️ تعذر جلب training_sources.json السحابي ({e}) — استخدام المصادر المدمجة")
 
 from datasets import load_dataset, interleave_datasets
 
@@ -943,10 +984,17 @@ try:
             use_amp = USE_MIXED_PRECISION
 
         with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
-
-            logits, loss = model(batch, targets=batch)
-            if loss.ndim > 0:
-                loss = loss.mean()  # تجميع متوسط الخسارة القادمة من الكرتين
+            if TRAINING_STAGE == "stage2_hepl_sft":
+                stage2_step = max(0, step - 150000)
+                out_dict = model(batch, targets=batch, step=stage2_step)
+                l_sft = out_dict["l_sft"].mean() if out_dict["l_sft"].ndim > 0 else out_dict["l_sft"]
+                l_bal = out_dict["l_bal"].mean() if out_dict["l_bal"].ndim > 0 else out_dict["l_bal"]
+                alpha_w = hepl_telemetry.alpha_bal if hepl_telemetry else 0.01
+                loss = l_sft + (alpha_w * l_bal)
+            else:
+                logits, loss = model(batch, targets=batch)
+                if loss.ndim > 0:
+                    loss = loss.mean()
             loss = loss / GRAD_ACCUM_STEPS
 
         scaler.scale(loss).backward()
@@ -1006,6 +1054,26 @@ try:
                 torch.save(checkpoint, 'latest.pt')
                 upload_file(path_or_fileobj='latest.pt', path_in_repo='checkpoints/latest.pt',
                             repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                # 🛡️ الحفظ التلقائي للنسخة المرجعية base_150k.pt عند بلوغ 150,000 في المرحلة 1
+                if TRAINING_STAGE == "stage1_pretrain" and step >= 150000 and not state.get("base_150k_saved"):
+                    upload_file(path_or_fileobj='latest.pt', path_in_repo='checkpoints/base_150k.pt',
+                                repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                    state["base_150k_saved"] = True
+                    print("🛡️ تم تأمين النسخة المرجعية checkpoints/base_150k.pt بنجاح!")
+
+                # 🧠 نظام المناعة الذاتية ومراقبة الفضاءات في المرحلة الثانية
+                if TRAINING_STAGE == "stage2_hepl_sft" and hepl_telemetry is not None:
+                    tel = raw_model.get_telemetry()
+                    state["manifold_telemetry"] = tel
+                    sh_res = hepl_telemetry.step_update(step, tel)
+                    if sh_res["alerts"]:
+                        state.setdefault("system_alerts", []).extend(sh_res["alerts"])
+                        state["system_alerts"] = state["system_alerts"][-20:]
+                    if sh_res["action"] == "pause_and_rollback":
+                        state["system_paused"] = True
+                        heartbeat(state, step)
+                        print("🚨 تم إيقاف التدريب تلقائياً بسبب انهيار أحد الفضاءات (>95%).")
+                        break
                 # 🫀 Heartbeat + loss history + training samples
                 state['current_step'] = step
                 state['current_loss'] = loss.item() * GRAD_ACCUM_STEPS
