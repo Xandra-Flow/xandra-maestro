@@ -1,0 +1,38 @@
+name: Xandra Knowledge Distillation
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_limit:
+        description: 'Number of examples to distill in this run'
+        required: false
+        default: '500'
+
+permissions:
+  contents: read
+
+jobs:
+  distill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install Dependencies
+        run: |
+          pip install -q requests datasets huggingface_hub pandas pyarrow
+
+      - name: 🎓 Run Offline Distillation
+        env:
+          HF_TOKEN_OWNER: ${{ secrets.HF_TOKEN_OWNER }}
+          HF_SFT_REPO: "smart-force/xandra-sft-corpus"
+          TEACHER_MODEL: "Qwen/Qwen2.5-7B-Instruct"
+          DISTILL_BATCH_LIMIT: ${{ github.event.inputs.batch_limit || '500' }}
+        run: python scripts/distill_sft.py
