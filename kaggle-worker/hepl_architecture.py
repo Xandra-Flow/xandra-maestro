@@ -14,7 +14,7 @@ Implements Layer 1 (HEPL) of the Triadic Cognitive Architecture (TCA):
     Isolation Mask, Dynamic Epsilon Schedule, and Smooth Annealing Warmup
   - Sparse Top-32+1 Other Bucket KL Distillation Loss (FP32 guarded)
   - Self-Healing Manifold Telemetry (Relative/Absolute Collapse + Act Norms)
-  - Surgical Weight Grafter (from XandraModern base_150k.pt with sigma=0.01)
+  - Surgical Weight Grafter (from XandraModern base_150k.pt with sigma=0.001)
 
 Note on Reproducibility:
   With DataParallel + gradient checkpointing on Tesla T4 x2, exact bit-level
@@ -193,6 +193,16 @@ class ConditionalSparseGate(nn.Module):
         )
         # Initialize mask controller bias low so all manifolds start open
         nn.init.constant_(self.mask_controller[-1].bias, -2.0)
+        # SAFE-RETRAIN: M_real-first init bias.
+        # softmax([ln(7), 0, 0, 0]) = [0.70, 0.10, 0.10, 0.10] exactly.
+        # Registered in __init__ so it is ALWAYS present on the module, even
+        # if graft_from_xandra_modern is not called (e.g. fresh model build).
+        # Graft later overwrites it with the same value, so the contract holds.
+        self.register_buffer(
+            "_m_real_init_bias",
+            torch.tensor([math.log(7.0), 0.0, 0.0, 0.0]),
+            persistent=False,
+        )
 
     def _compute_soft_weights(self, logits_fp32: torch.Tensor, mask_logits_fp32: torch.Tensor,
                               deterministic_flag: torch.Tensor = None, training: bool = True) -> torch.Tensor:
@@ -236,19 +246,20 @@ class ConditionalSparseGate(nn.Module):
         return sparse_weights
 
     def forward(self, x: torch.Tensor, step: int = 0, deterministic_flag: torch.Tensor = None):
-        # Reviewer Point 3: Explicit .float() upcast inside autocast(enabled=False)
+        # SAFE-RETRAIN: M_real-init bias annealed over first 1000 stage2 steps
         with torch.amp.autocast('cuda', enabled=False):
             x_fp32 = x.float()
             logits_fp32 = self.w_gate(x_fp32)
             mask_logits_fp32 = self.mask_controller(x_fp32)
-
+            if hasattr(self, "_m_real_init_bias") and self.training:
+                _anneal = max(0.0, 1.0 - step / 1000.0)
+                if _anneal > 0:
+                    logits_fp32 = logits_fp32 + _anneal * self._m_real_init_bias
             soft_probs = self._compute_soft_weights(
                 logits_fp32, mask_logits_fp32,
                 deterministic_flag=deterministic_flag,
-                training=self.training
+                training=self.training,
             )
-
-            # Reviewer Point 2: Smooth Annealing Window between step 500 and step 600
             if not self.training or step >= 600:
                 routing_weights = self._compute_topk_weights(soft_probs, step)
             elif step < 500:
@@ -257,15 +268,10 @@ class ConditionalSparseGate(nn.Module):
                 alpha_hard = (step - 500) / 100.0
                 topk_w = self._compute_topk_weights(soft_probs, step)
                 routing_weights = (1.0 - alpha_hard) * soft_probs + alpha_hard * topk_w
-
-            # Switch Transformer Load Balancing Loss L_bal (in FP32)
-            # f_i = fraction of tokens dispatched to manifold i
-            # P_i = mean router probability allocated to manifold i
             hard_choice = routing_weights.argmax(dim=-1)
             f_i = F.one_hot(hard_choice, num_classes=4).float().mean(dim=(0, 1))
             P_i = soft_probs.mean(dim=(0, 1))
             l_bal = 4.0 * torch.sum(f_i * P_i)
-
         return routing_weights.to(x.dtype), soft_probs, l_bal
 
 
@@ -337,18 +343,27 @@ class HEPLTransformerBlock(nn.Module):
         out_rat = self._run_manifold(self.m_rat, h)
 
         # Cross-Manifold Attention in M_rat (last 2 layers only)
-        if self.cross_manifold_enabled:
+        if self.cross_manifold_enabled and step >= 2000:
             others = torch.stack([out_real, out_intu, out_imag], dim=2)
             out_rat = self.cross_attn(out_rat, others)
 
-        # Record telemetry (routing shares + activation norms for Reviewer Point 5)
+        # Record telemetry (routing shares + activation norms for Reviewer Point 5).
+        # CRITICAL for DataParallel: side-effects on self.last_* are LOST because
+        # DataParallel runs forward on a replica that is discarded afterwards.
+        # So we ALSO return these as values so DataParallel can gather them.
         with torch.no_grad():
             self.last_routing_shares = routing_weights.float().mean(dim=(0, 1)).detach()
+            act_norms_tensor = torch.stack([
+                out_real.float().norm(dim=-1).mean(),
+                out_intu.float().norm(dim=-1).mean(),
+                out_imag.float().norm(dim=-1).mean(),
+                out_rat.float().norm(dim=-1).mean(),
+            ])  # shape (4,) — M_real first, then M_intu, M_imag, M_rat
             self.last_act_norms = {
-                "real": out_real.float().norm(dim=-1).mean().item(),
-                "intu": out_intu.float().norm(dim=-1).mean().item(),
-                "imag": out_imag.float().norm(dim=-1).mean().item(),
-                "rat":  out_rat.float().norm(dim=-1).mean().item(),
+                "real": act_norms_tensor[0].item(),
+                "intu": act_norms_tensor[1].item(),
+                "imag": act_norms_tensor[2].item(),
+                "rat":  act_norms_tensor[3].item(),
             }
 
         # Lift & aggregate active manifold outputs (Eq. 4)
@@ -360,7 +375,7 @@ class HEPLTransformerBlock(nn.Module):
         stacked_proj = torch.stack([p_real, p_intu, p_imag, p_rat], dim=2)  # (B, T, 4, D)
         h_out = torch.sum(routing_weights.unsqueeze(-1) * stacked_proj, dim=2)
 
-        return x + h_out, soft_probs, l_bal
+        return x + h_out, soft_probs, l_bal, act_norms_tensor
 class XandraHEPL(nn.Module):
     """
     Xandra Hope Layer 1 Model with Hierarchical Epistemological Perception Layers (HEPL).
@@ -419,14 +434,23 @@ class XandraHEPL(nn.Module):
 
         total_l_bal = torch.tensor(0.0, device=idx.device, dtype=torch.float32)
         avg_soft_probs = torch.zeros((idx.size(0), idx.size(1), 4), device=idx.device, dtype=torch.float32)
+        # SAFE-RETRAIN: accumulate per-block M_real act norm as a TENSOR (not a
+        # side-effect) so DataParallel can gather it from all replicas.
+        # shape after stack: (n_layers, 4) — M_real is column 0.
+        per_block_act_norms = []
 
         for block in self.blocks:
-            x, soft_probs, l_bal = block(x, step=step, deterministic_flag=deterministic_flag)
+            x, soft_probs, l_bal, blk_norms = block(x, step=step, deterministic_flag=deterministic_flag)
             total_l_bal = total_l_bal + l_bal
             avg_soft_probs = avg_soft_probs + soft_probs
+            per_block_act_norms.append(blk_norms)
 
         total_l_bal = total_l_bal / self.n_layers
         avg_soft_probs = avg_soft_probs / self.n_layers
+
+        # Stack to (n_layers, 4) and mean across layers → (4,). M_real = index 0.
+        # DataParallel will gather this as a tensor (no replica loss).
+        m_real_norm_tensor = torch.stack(per_block_act_norms, dim=0).mean(dim=0)
 
         x = self.norm(x)
         logits = self.head(x)
@@ -453,8 +477,22 @@ class XandraHEPL(nn.Module):
             "l_sft": l_sft,
             "l_bal": total_l_bal,
             "l_gate": l_gate,
-            "avg_soft_probs": avg_soft_probs
+            "avg_soft_probs": avg_soft_probs,
+            # SAFE-RETRAIN: scalar tensor of M_real norm averaged across all
+            # layers (per-batch). DataParallel-safe — gathered from replicas.
+            "m_real_norm": m_real_norm_tensor[0].detach()
         }
+
+    def fluency_probe(self) -> float:
+        """M_real activation norm averaged across all layers.
+        Used by the kill-switch to detect catastrophic forgetting."""
+        norms = []
+        for blk in self.blocks:
+            if blk.last_act_norms is not None:
+                norms.append(blk.last_act_norms.get("real", 0.0))
+        if not norms:
+            return 0.0
+        return sum(norms) / len(norms)
 
     def get_telemetry(self) -> dict:
         """Aggregates routing shares and activation norms across all layers."""
@@ -471,12 +509,13 @@ class XandraHEPL(nn.Module):
             shares /= valid_layers
             for k in norms:
                 norms[k] /= valid_layers
+        r_val, i_val, m_val, t_val = shares.tolist()
         return {
             "shares": {
-                "real": round(float(shares[0]), 4),
-                "intu": round(float(shares[1]), 4),
-                "imag": round(float(shares[2]), 4),
-                "rat":  round(float(shares[3]), 4),
+                "real": round(float(r_val), 4),
+                "intu": round(float(i_val), 4),
+                "imag": round(float(m_val), 4),
+                "rat":  round(float(t_val), 4),
             },
             "act_norms": {k: round(v, 4) for k, v in norms.items()}
         }
@@ -600,12 +639,12 @@ class SelfHealingTelemetry:
 
 
 def graft_from_xandra_modern(hepl_model: XandraHEPL, base_checkpoint_path: str,
-                             sigma: float = 0.01, device: str = "cpu") -> XandraHEPL:
+                             sigma: float = 0.001, device: str = "cpu") -> XandraHEPL:
     """
     SurgicalWeightGrafter:
       - Copies tok_emb, emb_norm, GQA attention, and layer norms directly from XandraModern.
       - Clones trained SwiGLU weights into all 4 manifolds (M_real, M_intu, M_imag, M_rat)
-        with independent Gaussian noise (sigma=0.01) to break symmetry cleanly.
+        with independent Gaussian noise (sigma=0.001 — 10x smaller than v1) to break symmetry cleanly.
     """
     ckpt = torch.load(base_checkpoint_path, map_location=device, weights_only=False)
     base_state = ckpt["model_state"] if "model_state" in ckpt else ckpt
