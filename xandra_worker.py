@@ -762,6 +762,9 @@ else:
         model.memory_b.load_state_dict(mem_ckpt["memory_b_state"], strict=False)
         for p in model.memory_b.parameters():
             p.requires_grad_(False)
+        for blk in model.hepl.blocks[:-2]:
+            for p in blk.parameters():
+                p.requires_grad_(False)
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"\n⚖️ Model: XandraFullTCAModel (Stage 4: Full Triadic Cognitive Architecture + LDR)")
         print(f"   Active Trainable Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
