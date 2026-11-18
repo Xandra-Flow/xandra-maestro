@@ -696,6 +696,71 @@ else:
         print(f"\n🧩 Model: XandraStage3Model (Layer 1 Frozen + Meta-Memory B Trainable)")
         print(f"   Trainable Memory B Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
         last_step = state.get("current_step", 171148)
+
+    elif TRAINING_STAGE == "stage4_ldr":
+        import shutil
+        for fname in ["hepl_architecture.py", "memory_b_cdd.py", "ldr_referee.py"]:
+            p = hf_hub_download(repo_id="smart-force/xandra-core-private", filename=fname, repo_type="model", token=HF_TOKEN)
+            shutil.copy(p, f"/tmp/{fname}")
+        if "/tmp" not in sys.path:
+            sys.path.insert(0, "/tmp")
+        from hepl_architecture import XandraHEPL
+        from memory_b_cdd import XandraMetaMemoryB
+        from ldr_referee import XandraLDRSystem
+
+        class XandraFullTCAModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.hepl = XandraHEPL(
+                    vocab_size=VOCAB_SIZE, dim=MODEL_DIM, n_layers=N_LAYERS,
+                    n_heads=N_HEADS, n_kv_heads=N_KV_HEADS, max_seq_len=MAX_LEN,
+                    use_gradient_checkpointing=True
+                )
+                self.memory_b = XandraMetaMemoryB(dim=MODEL_DIM, n_heads=4, window_size=64)
+                self.ldr = XandraLDRSystem(
+                    vocab_size=VOCAB_SIZE, shared_tok_emb=self.hepl.tok_emb,
+                    base_dim=MODEL_DIM, probe_dim=256, n_layers=2
+                )
+
+            def forward(self, idx, targets=None, step=0):
+                x = self.hepl.emb_norm(self.hepl.tok_emb(idx))
+                for blk in self.hepl.blocks:
+                    x, _, _ = blk(x, step=step)
+                mem_out = self.memory_b(x)
+                h_draft = self.hepl.norm(mem_out["hidden_states"])
+                draft_logits = self.hepl.head(h_draft)
+
+                B, T = idx.shape
+                split_pt = max(1, T // 2)
+                probe_prefix = idx[:, :split_pt]
+                probe_targets = targets[:, :split_pt] if targets is not None else None
+
+                h_ref = self.hepl.emb_norm(self.hepl.tok_emb(idx))
+                for blk in self.hepl.blocks[-2:]:
+                    h_ref, _, _ = blk(h_ref, step=step)
+                refined_logits = self.hepl.head(self.hepl.norm(h_ref + 0.15 * h_draft))
+
+                return self.ldr.compute_stage4_loss(
+                    probe_input_ids=probe_prefix,
+                    draft_hidden_states=h_draft.detach(),
+                    probe_targets=probe_targets,
+                    draft_logits=draft_logits,
+                    refined_logits=refined_logits,
+                    gold_answer_targets=targets if targets is not None else idx
+                )
+
+        model = XandraFullTCAModel().to(device)
+        hepl_ckpt = torch.load(hf_hub_download(repo_id=HF_REPO, filename="checkpoints/hepl_171k.pt", repo_type="model", token=HF_TOKEN), map_location=device, weights_only=False)
+        model.hepl.load_state_dict({k.replace("module.", "").replace("_orig_mod.", ""): v for k, v in hepl_ckpt["model_state"].items()}, strict=False)
+        mem_ckpt = torch.load(hf_hub_download(repo_id=HF_REPO, filename="checkpoints/mem_172k.pt", repo_type="model", token=HF_TOKEN), map_location=device, weights_only=False)
+        model.memory_b.load_state_dict(mem_ckpt["memory_b_state"], strict=False)
+        for p in model.memory_b.parameters():
+            p.requires_grad_(False)
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"\n⚖️ Model: XandraFullTCAModel (Stage 4: Full Triadic Cognitive Architecture + LDR)")
+        print(f"   Active Trainable Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
+        last_step = state.get("current_step", 172650)
+
     else:
         TRAINING_STAGE = "stage1_pretrain"
         model = XandraModern(max_seq_len=MAX_LEN).to(device)
@@ -725,7 +790,7 @@ else:
 # (which the maestro does NOT upload to Kaggle).
 
 print("\n📖 تحميل مصادر التدريب...")
-if TRAINING_STAGE in ("stage2_hepl_sft", "stage3_memory_b"):
+if TRAINING_STAGE in ("stage2_hepl_sft", "stage3_memory_b", "stage4_ldr"):
     sources_config = {
         "sources": [
             {"name": "Xandra-SFT-Corpus", "type": "stream",
@@ -1061,6 +1126,14 @@ try:
                     "trigger_rate": round(float(out_dict["trigger_rate"].mean().item()), 4),
                     "theta_crit": round(float(out_dict["theta_crit"].mean().item()), 4)
                 }
+            elif TRAINING_STAGE == "stage4_ldr":
+                out_dict = model(batch, targets=batch, step=step)
+                loss = out_dict["total_loss"].mean() if out_dict["total_loss"].ndim > 0 else out_dict["total_loss"]
+                state["ldr_telemetry"] = {
+                    "dialectic_gain": round(float(out_dict["dialectic_gain"].mean().item()), 4),
+                    "l_probe": round(float(out_dict["l_probe"].mean().item()), 4),
+                    "l_anti_templ": round(float(out_dict["l_anti_templ"].mean().item()), 4)
+                }
             else:
                 logits, loss = model(batch, targets=batch)
                 if loss.ndim > 0:
@@ -1081,7 +1154,7 @@ try:
         step += 1
         losses.append(loss.item() * GRAD_ACCUM_STEPS)
 
-        if TRAINING_STAGE == "stage3_memory_b" and step >= MAX_STEPS:
+        if TRAINING_STAGE in ("stage3_memory_b", "stage4_ldr") and step >= MAX_STEPS:
             print(f"🎯 اكتملت معايرة المرحلة الثالثة بنجاح عند الخطوة {step:,} — إنهاء نظيف!")
             break
 
@@ -1237,6 +1310,17 @@ finally:
                     upload_file(path_or_fileobj='mem_172k.pt', path_in_repo='checkpoints/mem_172k.pt',
                                 repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
                     print("🎯 تم حفظ ورفع checkpoints/mem_172k.pt بنجاح عند انتهاء المرحلة الثالثة!")
+                if TRAINING_STAGE == "stage4_ldr":
+                    tca_payload = {
+                        'full_tca_state': model_state,
+                        'step': step,
+                        'loss': final_loss,
+                        'telemetry': state.get("ldr_telemetry", {})
+                    }
+                    torch.save(tca_payload, 'xandra_tca_final.pt')
+                    upload_file(path_or_fileobj='xandra_tca_final.pt', path_in_repo='checkpoints/xandra_tca_final.pt',
+                                repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                    print("🏆 تم حفظ ورفع checkpoints/xandra_tca_final.pt بنجاح عند إتمام المعمارية الثلاثية!")
             except Exception as e:
                 print(f"⚠️ فشل حفظ checkpoint النهائي: {e}")
 
