@@ -638,6 +638,64 @@ else:
             base_path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/base_150k.pt", repo_type="model", token=HF_TOKEN)
             model = graft_from_xandra_modern(model, base_path, sigma=0.01, device=device)
             last_step = state.get("current_step", 150000)
+
+    elif TRAINING_STAGE == "stage3_memory_b":
+        import shutil
+        for fname in ["hepl_architecture.py", "memory_b_cdd.py"]:
+            p = hf_hub_download(repo_id="smart-force/xandra-core-private", filename=fname, repo_type="model", token=HF_TOKEN)
+            shutil.copy(p, f"/tmp/{fname}")
+        if "/tmp" not in sys.path:
+            sys.path.insert(0, "/tmp")
+        from hepl_architecture import XandraHEPL
+        from memory_b_cdd import XandraMetaMemoryB
+
+        class XandraStage3Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.hepl = XandraHEPL(
+                    vocab_size=VOCAB_SIZE, dim=MODEL_DIM, n_layers=N_LAYERS,
+                    n_heads=N_HEADS, n_kv_heads=N_KV_HEADS, max_seq_len=MAX_LEN,
+                    use_gradient_checkpointing=False
+                )
+                self.memory_b = XandraMetaMemoryB(dim=MODEL_DIM, n_heads=4, window_size=64)
+
+            def forward(self, idx, targets=None, step=0):
+                with torch.no_grad():
+                    x = self.hepl.emb_norm(self.hepl.tok_emb(idx))
+                    for blk in self.hepl.blocks:
+                        x, _, _ = blk(x, step=step)
+                mem_out = self.memory_b(x)
+                h_steered = self.hepl.norm(mem_out["hidden_states"])
+                logits = self.hepl.head(h_steered)
+                l_sft = torch.tensor(0.0, device=idx.device)
+                if targets is not None:
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    shift_labels = targets[..., 1:].contiguous()
+                    l_sft = F.cross_entropy(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1),
+                        ignore_index=-100
+                    )
+                return {
+                    "l_sft": l_sft,
+                    "cal_loss": mem_out["calibration_loss"],
+                    "mean_dispersion": torch.tensor(mem_out["mean_dispersion"], device=idx.device),
+                    "trigger_rate": torch.tensor(mem_out["trigger_rate"], device=idx.device),
+                    "theta_crit": torch.tensor(mem_out["theta_crit"], device=idx.device)
+                }
+
+        model = XandraStage3Model().to(device)
+        # تحميل أوزان المرحلة الثانية وتجميدها بالكامل
+        hepl_ckpt_path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/hepl_171k.pt", repo_type="model", token=HF_TOKEN)
+        hepl_ckpt = torch.load(hepl_ckpt_path, map_location=device, weights_only=False)
+        clean_hepl = {k.replace("module.", "").replace("_orig_mod.", ""): v for k, v in hepl_ckpt["model_state"].items()}
+        model.hepl.load_state_dict(clean_hepl, strict=False)
+        for p in model.hepl.parameters():
+            p.requires_grad_(False)
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"\n🧩 Model: XandraStage3Model (Layer 1 Frozen + Meta-Memory B Trainable)")
+        print(f"   Trainable Memory B Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
+        last_step = state.get("current_step", 171148)
     else:
         TRAINING_STAGE = "stage1_pretrain"
         model = XandraModern(max_seq_len=MAX_LEN).to(device)
@@ -667,7 +725,7 @@ else:
 # (which the maestro does NOT upload to Kaggle).
 
 print("\n📖 تحميل مصادر التدريب...")
-if TRAINING_STAGE == "stage2_hepl_sft":
+if TRAINING_STAGE in ("stage2_hepl_sft", "stage3_memory_b"):
     sources_config = {
         "sources": [
             {"name": "Xandra-SFT-Corpus", "type": "stream",
@@ -993,6 +1051,16 @@ try:
                 l_bal = out_dict["l_bal"].mean() if out_dict["l_bal"].ndim > 0 else out_dict["l_bal"]
                 alpha_w = hepl_telemetry.alpha_bal if hepl_telemetry else 0.01
                 loss = l_sft + (alpha_w * l_bal)
+            elif TRAINING_STAGE == "stage3_memory_b":
+                out_dict = model(batch, targets=batch, step=step)
+                l_sft = out_dict["l_sft"].mean() if out_dict["l_sft"].ndim > 0 else out_dict["l_sft"]
+                cal_l = out_dict["cal_loss"].mean() if out_dict["cal_loss"].ndim > 0 else out_dict["cal_loss"]
+                loss = (0.2 * l_sft) + cal_l
+                state["memory_b_telemetry"] = {
+                    "mean_dispersion": round(float(out_dict["mean_dispersion"].mean().item()), 4),
+                    "trigger_rate": round(float(out_dict["trigger_rate"].mean().item()), 4),
+                    "theta_crit": round(float(out_dict["theta_crit"].mean().item()), 4)
+                }
             else:
                 logits, loss = model(batch, targets=batch)
                 if loss.ndim > 0:
@@ -1012,6 +1080,10 @@ try:
 
         step += 1
         losses.append(loss.item() * GRAD_ACCUM_STEPS)
+
+        if TRAINING_STAGE == "stage3_memory_b" and step >= MAX_STEPS:
+            print(f"🎯 اكتملت معايرة المرحلة الثالثة بنجاح عند الخطوة {step:,} — إنهاء نظيف!")
+            break
 
         if i % 10 == 0:
             avg_loss = sum(losses[-10:]) / min(10, len(losses))
@@ -1062,6 +1134,20 @@ try:
                                 repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
                     state["base_150k_saved"] = True
                     print("🛡️ تم تأمين النسخة المرجعية checkpoints/base_150k.pt بنجاح!")
+                # 🧩 حفظ أوزان الذاكرة المستقلة في المرحلة الثالثة (Memory B & CDD)
+                if TRAINING_STAGE == "stage3_memory_b":
+                    mem_payload = {
+                        'memory_b_state': raw_model.memory_b.state_dict(),
+                        'step': step,
+                        'telemetry': state.get("memory_b_telemetry", {})
+                    }
+                    torch.save(mem_payload, 'memory_b_latest.pt')
+                    upload_file(path_or_fileobj='memory_b_latest.pt', path_in_repo='checkpoints/memory_b_latest.pt',
+                                repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                    if step >= 172600:
+                        upload_file(path_or_fileobj='memory_b_latest.pt', path_in_repo='checkpoints/mem_172k.pt',
+                                    repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                        print("🎯 تم حفظ أوزان الذاكرة النهائية checkpoints/mem_172k.pt بنجاح!")
 
                 # 🧠 نظام المناعة الذاتية ومراقبة الفضاءات في المرحلة الثانية
                 if TRAINING_STAGE == "stage2_hepl_sft" and hepl_telemetry is not None:
@@ -1141,6 +1227,16 @@ finally:
                 torch.save(checkpoint, 'latest.pt')
                 upload_file(path_or_fileobj='latest.pt', path_in_repo='checkpoints/latest.pt',
                             repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                if TRAINING_STAGE == "stage3_memory_b":
+                    mem_payload = {
+                        'memory_b_state': raw_model.memory_b.state_dict(),
+                        'step': step,
+                        'telemetry': state.get("memory_b_telemetry", {})
+                    }
+                    torch.save(mem_payload, 'mem_172k.pt')
+                    upload_file(path_or_fileobj='mem_172k.pt', path_in_repo='checkpoints/mem_172k.pt',
+                                repo_id=HF_REPO, repo_type="model", token=HF_TOKEN)
+                    print("🎯 تم حفظ ورفع checkpoints/mem_172k.pt بنجاح عند انتهاء المرحلة الثالثة!")
             except Exception as e:
                 print(f"⚠️ فشل حفظ checkpoint النهائي: {e}")
 
