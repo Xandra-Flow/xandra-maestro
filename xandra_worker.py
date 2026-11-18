@@ -1125,21 +1125,31 @@ try:
             use_amp = USE_MIXED_PRECISION
 
         with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+            # SAFE-RETRAIN: per-step M_real norm read from forward() output
+            # (NOT from a side-effect on the model — DataParallel loses those).
+            # Reset each iteration; populated below for stage2 only.
+            current_m_real_norm = None
             if TRAINING_STAGE == "stage2_hepl_sft":
                 stage2_step = max(0, step - 150000)
                 out_dict = model(
                     batch, targets=batch, step=stage2_step,
                 )
                 l_sft  = out_dict["l_sft"].mean()  if (out_dict["l_sft"]  is not None and out_dict["l_sft"].ndim  > 0) else (out_dict["l_sft"]  if out_dict["l_sft"]  is not None else torch.tensor(0.0, device=device))
-                l_bal  = out_dict["l_bal"].mean()  if out_dict["l_bal"].ndim  > 0 else out_dict["l_bal"]
+                l_bal  = out_dict["l_bal"].mean()  if out_dict["l_bal"].ndim > 0 else out_dict["l_bal"]
                 l_gate = out_dict["l_gate"].mean() if out_dict["l_gate"].ndim > 0 else out_dict["l_gate"]
                 l_kl   = torch.tensor(0.0, device=device)
                 beta  = 0.05 if stage2_step >= 1000 else 0.0
                 gamma = 0.50 if stage2_step >= 2000 else 0.0
                 alpha_w = hepl_telemetry.alpha_bal if hepl_telemetry else 0.01
                 loss = l_sft + (alpha_w * l_bal) + (beta * l_gate) + (gamma * l_kl)
+                # Read M_real norm from the forward output dict. DataParallel
+                # gathers tensors but the per-replica scalar is the same for
+                # both replicas (same weights), so .item() is valid.
+                if "m_real_norm" in out_dict and out_dict["m_real_norm"] is not None:
+                    current_m_real_norm = float(out_dict["m_real_norm"].mean().item())
                 if step % 100 == 0:
-                    print(f"[Stage2] step {step} | L_SFT {l_sft.item():.4f} | L_bal {l_bal.item():.4f} | L_gate {l_gate.item():.4f} | L_KL {l_kl.item():.4f} | beta {beta} gamma {gamma}")
+                    _mr = f"{current_m_real_norm:.4f}" if current_m_real_norm is not None else "n/a"
+                    print(f"[Stage2] step {step} | L_SFT {l_sft.item():.4f} | L_bal {l_bal.item():.4f} | L_gate {l_gate.item():.4f} | L_KL {l_kl.item():.4f} | beta {beta} gamma {gamma} | M_real_norm {_mr}")
             elif TRAINING_STAGE == "stage3_memory_b":
                 out_dict = model(batch, targets=batch, step=step)
                 l_sft = out_dict["l_sft"].mean() if out_dict["l_sft"].ndim > 0 else out_dict["l_sft"]
@@ -1179,15 +1189,16 @@ try:
             continue
 
         if TRAINING_STAGE == "stage2_hepl_sft" and step % KILLSWITCH_CHECK_EVERY == 0:
-            raw_model = model.module if hasattr(model, "module") else model
-            if hasattr(raw_model, "fluency_probe"):
-                _m_real_norm = raw_model.fluency_probe()
-                if M_REAL_NORM_BASELINE is None and _m_real_norm > 0:
-                    M_REAL_NORM_BASELINE = _m_real_norm
+            # SAFE-RETRAIN: use the M_real norm captured from this iteration's
+            # forward() output (DataParallel-safe). The previous version called
+            # raw_model.fluency_probe() which read a side-effect lost by DP.
+            if current_m_real_norm is not None and current_m_real_norm > 0:
+                if M_REAL_NORM_BASELINE is None:
+                    M_REAL_NORM_BASELINE = current_m_real_norm
                     print(f"[KillSwitch] baseline M_real norm = {M_REAL_NORM_BASELINE:.4f}")
-                elif M_REAL_NORM_BASELINE is not None:
-                    _ratio = _m_real_norm / max(M_REAL_NORM_BASELINE, 1e-8)
-                    print(f"[KillSwitch] step {step} M_real norm = {_m_real_norm:.4f} (ratio {_ratio:.2f})")
+                else:
+                    _ratio = current_m_real_norm / max(M_REAL_NORM_BASELINE, 1e-8)
+                    print(f"[KillSwitch] step {step} M_real norm = {current_m_real_norm:.4f} (ratio {_ratio:.2f})")
                     if _ratio < KILLSWITCH_MIN_RATIO:
                         print(f"[FATAL] M_real norm collapsed to {_ratio:.2%} of baseline. HALTING.")
                         break
