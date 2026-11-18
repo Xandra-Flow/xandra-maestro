@@ -36,7 +36,7 @@ TOP_K = 32
 if not HF_TOKEN:
     raise ValueError("❌ Missing HF_TOKEN_OWNER / HF_TOKEN environment variable.")
 
-HF_API_URL = "https://" + "api-inference.huggingface.co/models/" + TEACHER_MODEL
+HF_API_URL = "https://" + "router.huggingface.co/hf-inference/models/" + TEACHER_MODEL
 HEADERS = {
     "Authorization": f"Bearer {HF_TOKEN.strip()}",
     "Content-Type": "application/json"
