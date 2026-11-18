@@ -740,7 +740,7 @@ else:
                     h_ref, _, _ = blk(h_ref, step=step)
                 refined_logits = self.hepl.head(self.hepl.norm(h_ref + 0.15 * h_draft))
 
-                return self.ldr.compute_stage4_loss(
+                res = self.ldr.compute_stage4_loss(
                     probe_input_ids=probe_prefix,
                     draft_hidden_states=h_draft.detach(),
                     probe_targets=probe_targets,
@@ -748,6 +748,12 @@ else:
                     refined_logits=refined_logits,
                     gold_answer_targets=targets if targets is not None else idx
                 )
+                return {
+                    "total_loss": res["total_loss"],
+                    "dialectic_gain": torch.tensor(res["dialectic_gain"], device=idx.device),
+                    "l_probe": torch.tensor(res["l_probe"], device=idx.device),
+                    "l_anti_templ": torch.tensor(res["l_anti_templ"], device=idx.device)
+                }
 
         model = XandraFullTCAModel().to(device)
         hepl_ckpt = torch.load(hf_hub_download(repo_id=HF_REPO, filename="checkpoints/hepl_171k.pt", repo_type="model", token=HF_TOKEN), map_location=device, weights_only=False)
@@ -810,7 +816,7 @@ else:
     ]
 }
 # Try loading external config directly from HuggingFace Cloud (Stage 1 only)
-if TRAINING_STAGE != "stage2_hepl_sft":
+if TRAINING_STAGE not in ("stage2_hepl_sft", "stage3_memory_b", "stage4_ldr"):
     try:
         sources_path = hf_hub_download(repo_id=HF_REPO, filename="training_sources.json", repo_type="model", token=HF_TOKEN)
         with open(sources_path, 'r', encoding='utf-8') as f:
