@@ -609,15 +609,16 @@ else:
 
     hepl_telemetry = None
     if TRAINING_STAGE == "stage2_hepl_sft":
-        if not os.path.exists("hepl_architecture.py"):
-            arch_path = hf_hub_download(
-                repo_id="smart-force/xandra-core-private",
-                filename="hepl_architecture.py",
-                repo_type="model",
-                token=HF_TOKEN
-            )
-            import shutil
-            shutil.copy(arch_path, "hepl_architecture.py")
+        import shutil
+        arch_path = hf_hub_download(
+            repo_id="smart-force/xandra-core-private",
+            filename="hepl_architecture.py",
+            repo_type="model",
+            token=HF_TOKEN
+        )
+        shutil.copy(arch_path, "/tmp/hepl_architecture.py")
+        if "/tmp" not in sys.path:
+            sys.path.insert(0, "/tmp")
         from hepl_architecture import XandraHEPL, SelfHealingTelemetry, graft_from_xandra_modern
         model = XandraHEPL(
             vocab_size=VOCAB_SIZE, dim=MODEL_DIM, n_layers=N_LAYERS,
