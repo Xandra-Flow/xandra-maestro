@@ -449,7 +449,7 @@ class XandraHEPL(nn.Module):
                 l_gate = F.nll_loss(torch.log(seq_gate_probs), target_manifold.long())
 
         return {
-            "logits": logits,
+            "logits": None if self.training else logits,
             "l_sft": l_sft,
             "l_bal": total_l_bal,
             "l_gate": l_gate,
