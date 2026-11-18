@@ -570,7 +570,7 @@ if USE_CONTINUAL_PRETRAINING:
     # Load pretrained model with bfloat16 to save VRAM
     model = AutoModelForCausalLM.from_pretrained(
         PRETRAINED_MODEL_NAME,
-        torch_dtype=torch.bfloat16 if USE_MIXED_PRECISION else torch.float32,
+        torch_dtype=torch.float16 if USE_MIXED_PRECISION else torch.float32,
         attn_implementation="sdpa",  # Use scaled_dot_product_attention
         low_cpu_mem_usage=True,
         trust_remote_code=True
@@ -636,7 +636,7 @@ else:
         # إذا كانت هذه أول خطوة في المرحلة 2، نفّذ النسخ الجراحي من base_150k.pt
         if last_step <= 150000:
             base_path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/base_150k.pt", repo_type="model", token=HF_TOKEN)
-            model = graft_from_xandra_modern(model, base_path, sigma=0.01, device=device)
+            model = graft_from_xandra_modern(model, base_path, sigma=0.001, device=device)
             last_step = state.get("current_step", 150000)
 
     elif TRAINING_STAGE == "stage3_memory_b":
@@ -1045,6 +1045,16 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_STEP
 # 🚀 Mixed Precision
 scaler = torch.amp.GradScaler('cuda', enabled=USE_MIXED_PRECISION)
 
+# --- SAFE-RETRAIN: distillation loss + kill-switch baseline ---
+if TRAINING_STAGE == "stage2_hepl_sft":
+    from hepl_architecture import SparseTopKDistillationLoss
+    kl_loss_fn = SparseTopKDistillationLoss(temperature=2.0).to(device)
+else:
+    kl_loss_fn = None
+M_REAL_NORM_BASELINE = None
+KILLSWITCH_MIN_RATIO = 0.30
+KILLSWITCH_CHECK_EVERY = 200
+
 # 🚀 torch.compile
 if USE_TORCH_COMPILE and hasattr(torch, 'compile'):
     try:
@@ -1107,24 +1117,29 @@ try:
         if PRECISION_MODE == "float16":
             amp_dtype = torch.float16
             use_amp = True
-        elif PRECISION_MODE == "bfloat16":
-            amp_dtype = torch.bfloat16
-            use_amp = True
         elif PRECISION_MODE == "float32":
             amp_dtype = torch.float32
             use_amp = False
-        else:  # auto
-            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        else:  # auto or bfloat16 — forced to float16 on T4
+            amp_dtype = torch.float16
             use_amp = USE_MIXED_PRECISION
 
         with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
             if TRAINING_STAGE == "stage2_hepl_sft":
                 stage2_step = max(0, step - 150000)
-                out_dict = model(batch, targets=batch, step=stage2_step)
-                l_sft = out_dict["l_sft"].mean() if out_dict["l_sft"].ndim > 0 else out_dict["l_sft"]
-                l_bal = out_dict["l_bal"].mean() if out_dict["l_bal"].ndim > 0 else out_dict["l_bal"]
+                out_dict = model(
+                    batch, targets=batch, step=stage2_step,
+                )
+                l_sft  = out_dict["l_sft"].mean()  if (out_dict["l_sft"]  is not None and out_dict["l_sft"].ndim  > 0) else (out_dict["l_sft"]  if out_dict["l_sft"]  is not None else torch.tensor(0.0, device=device))
+                l_bal  = out_dict["l_bal"].mean()  if out_dict["l_bal"].ndim  > 0 else out_dict["l_bal"]
+                l_gate = out_dict["l_gate"].mean() if out_dict["l_gate"].ndim > 0 else out_dict["l_gate"]
+                l_kl   = torch.tensor(0.0, device=device)
+                beta  = 0.05 if stage2_step >= 1000 else 0.0
+                gamma = 0.50 if stage2_step >= 2000 else 0.0
                 alpha_w = hepl_telemetry.alpha_bal if hepl_telemetry else 0.01
-                loss = l_sft + (alpha_w * l_bal)
+                loss = l_sft + (alpha_w * l_bal) + (beta * l_gate) + (gamma * l_kl)
+                if step % 100 == 0:
+                    print(f"[Stage2] step {step} | L_SFT {l_sft.item():.4f} | L_bal {l_bal.item():.4f} | L_gate {l_gate.item():.4f} | L_KL {l_kl.item():.4f} | beta {beta} gamma {gamma}")
             elif TRAINING_STAGE == "stage3_memory_b":
                 out_dict = model(batch, targets=batch, step=step)
                 l_sft = out_dict["l_sft"].mean() if out_dict["l_sft"].ndim > 0 else out_dict["l_sft"]
@@ -1151,6 +1166,31 @@ try:
 
         scaler.scale(loss).backward()
         accum_loss += loss.item()
+
+        # --- SAFE-RETRAIN: NaN/Inf detection + kill-switch ---
+        if not torch.isfinite(loss):
+            print(f"[FATAL] non-finite loss at step {step}: {loss.item()}. Rolling back.")
+            try:
+                load_checkpoint_smart(model)
+            except Exception as _rb_err:
+                print(f"[FATAL] rollback failed: {_rb_err}")
+            optimizer.zero_grad()
+            scaler.update()
+            continue
+
+        if TRAINING_STAGE == "stage2_hepl_sft" and step % KILLSWITCH_CHECK_EVERY == 0:
+            raw_model = model.module if hasattr(model, "module") else model
+            if hasattr(raw_model, "fluency_probe"):
+                _m_real_norm = raw_model.fluency_probe()
+                if M_REAL_NORM_BASELINE is None and _m_real_norm > 0:
+                    M_REAL_NORM_BASELINE = _m_real_norm
+                    print(f"[KillSwitch] baseline M_real norm = {M_REAL_NORM_BASELINE:.4f}")
+                elif M_REAL_NORM_BASELINE is not None:
+                    _ratio = _m_real_norm / max(M_REAL_NORM_BASELINE, 1e-8)
+                    print(f"[KillSwitch] step {step} M_real norm = {_m_real_norm:.4f} (ratio {_ratio:.2f})")
+                    if _ratio < KILLSWITCH_MIN_RATIO:
+                        print(f"[FATAL] M_real norm collapsed to {_ratio:.2%} of baseline. HALTING.")
+                        break
 
         if (i + 1) % GRAD_ACCUM_STEPS == 0:
             scaler.unscale_(optimizer)
