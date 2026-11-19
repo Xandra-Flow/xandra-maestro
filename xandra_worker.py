@@ -52,6 +52,7 @@ import os
 import json
 import time
 import math
+import random
 import threading
 import queue as queue_mod
 import torch
@@ -878,10 +879,40 @@ TEXT_BUFFER = []
 BUFFER_SIZE = 2500
 STREAM_ITER = None
 DISTILLED_BUFFER = []
+MANIFOLD_INDEX = {0: [], 1: [], 2: [], 3: []}  # SAFE-RETRAIN: per-manifold index for balanced sampling
+DISTILLED_BAD_COUNT = 0  # SAFE-RETRAIN: count of malformed rows skipped during load
+
+# Patterns that indicate malformed distilled rows (skip during load)
+_BAD_PREFIXES = ("[DETERMINISTIC]", "[INTUITIVE]", "[IMAGINATIVE]", "[RATIONAL]",
+                 "[REAL]", "[INTU]", "[IMAG]", "[RAT]",
+                 "DETERMINISTIC:", "INTUITIVE:", "IMAGINATIVE:", "RATIONAL:")
+_NO_QUESTION_MARKERS = ("لم تقدم سؤال", "لم تطرح سؤال", "بالطبع، ولكن يبدو أنك لم",
+                        "يبدو أنك لم تقدم", "لم تقدم أي سؤال", "لم تذكر أي سؤال")
+
+def _is_bad_distilled_row(text):
+    """Returns True if the row is malformed (tag prefix, no-question response, too short)."""
+    if text is None:
+        return True
+    try:
+        if isinstance(text, float) and math.isnan(text):
+            return True
+    except TypeError:
+        pass
+    s = str(text).strip()
+    if len(s) < 60:
+        return True
+    for p in _BAD_PREFIXES:
+        if s.startswith(p):
+            return True
+    head = s[:300]
+    for m in _NO_QUESTION_MARKERS:
+        if m in head:
+            return True
+    return False
 
 def load_distilled_records():
     """يسحب سجلات التقطير المعرفي من مجلد distilled/ بشكل مستقل لتجنب تعارض الأعمدة."""
-    global DISTILLED_BUFFER
+    global DISTILLED_BUFFER, MANIFOLD_INDEX
     if DISTILLED_BUFFER or globals().get("TRAINING_STAGE") != "stage2_hepl_sft":
         return
     try:
@@ -901,23 +932,66 @@ def load_distilled_records():
                 txt = str(row.get("text", "")).strip()
                 if len(txt) < 30:
                     continue
+                # SAFE-RETRAIN: skip malformed rows (tag prefixes, no-question responses)
+                global DISTILLED_BAD_COUNT
+                if _is_bad_distilled_row(row.get("text")):
+                    DISTILLED_BAD_COUNT += 1
+                    continue
                 try:
                     t_ids = json.loads(row["teacher_top32_ids"]) if isinstance(row.get("teacher_top32_ids"), str) else None
                     t_lps = json.loads(row["teacher_top32_logprobs"]) if isinstance(row.get("teacher_top32_logprobs"), str) else None
                     t_man = int(row["target_manifold"]) if pd.notna(row.get("target_manifold")) else None
                 except Exception:
                     t_ids, t_lps, t_man = None, None, None
+                rec_idx = len(DISTILLED_BUFFER)
                 DISTILLED_BUFFER.append({
                     "text": txt,
                     "target_manifold": t_man,
                     "teacher_top32_ids": t_ids,
                     "teacher_top32_logprobs": t_lps
                 })
+                # Build per-manifold index for balanced sampling
+                if t_man in (0, 1, 2, 3):
+                    MANIFOLD_INDEX[t_man].append(rec_idx)
         if DISTILLED_BUFFER:
-            print(f"🎓 تم تحميل {len(DISTILLED_BUFFER):,} سجل تقطير معرفي من مجلد distilled/ بنجاح!")
+            total = len(DISTILLED_BUFFER)
+            print(f"🎓 تم تحميل {total:,} سجل تقطير معرفي من مجلد distilled/ بنجاح!")
+            if DISTILLED_BAD_COUNT > 0:
+                print(f"   🗑️ تم تخطّي {DISTILLED_BAD_COUNT:,} سجل سيئ (بادئة وسم/لا سؤال/قصير جداً)")
+            # SAFE-RETRAIN: report raw manifold distribution + balanced sampling strategy
+            raw_dist = {m: len(MANIFOLD_INDEX[m]) for m in (0, 1, 2, 3)}
+            print(f"   📊 توزيع الفضاءات (خام): real={raw_dist[0]} intu={raw_dist[1]} imag={raw_dist[2]} rat={raw_dist[3]}")
+            raw_pcts = {m: raw_dist[m] / total * 100 for m in (0, 1, 2, 3)}
+            print(f"   📊 نسب خام: real={raw_pcts[0]:.1f}% intu={raw_pcts[1]:.1f}% imag={raw_pcts[2]:.1f}% rat={raw_pcts[3]:.1f}%")
+            # If any manifold has < 30 records, balanced sampling degrades to weighted-random
+            min_count = min(raw_dist.values())
+            if min_count < 30:
+                print(f"   ⚠️ فضاء لديه < 30 سجل (min={min_count}) — سيتم استخدام استعيانة مرجّحة بدل المتوازنة")
+                # Build a sampling weight array: inverse-frequency, normalized
+                weights = []
+                for rec in DISTILLED_BUFFER:
+                    m = rec["target_manifold"]
+                    if m in (0, 1, 2, 3) and raw_dist[m] > 0:
+                        weights.append(1.0 / raw_dist[m])
+                    else:
+                        weights.append(0.0)
+                w_sum = sum(weights)
+                if w_sum > 0:
+                    global DISTILLED_SAMPLING_WEIGHTS
+                    DISTILLED_SAMPLING_WEIGHTS = [w / w_sum for w in weights]
+                    print(f"   ✅ تم بناء أوزان استعيانة عكسية التكرار (inverse-frequency)")
+            else:
+                print(f"   ✅ جميع الفضاءات لديها ≥ 30 سجل — استعيانة متوازنة 25%/25%/25%/25% مُفعّلة")
+            # Per-manifold stats for verification
+            for m in (0, 1, 2, 3):
+                cnt = len(MANIFOLD_INDEX[m])
+                bar = "█" * int(cnt / total * 40)
+                labels = {0: "real", 1: "intu", 2: "imag", 3: "rat"}
+                print(f"     • {labels[m]:5s}: {cnt:4d} ({raw_pcts[m]:5.1f}%) {bar}")
     except Exception as e:
         print(f"⚠️ تعذر تحميل سجلات التقطير الجانبية (سيستمر التدريب بالبيانات الأساسية): {e}")
 
+DISTILLED_SAMPLING_WEIGHTS = None  # set only if min manifold < 30 records
 load_distilled_records()
 
 def refill_text_buffer():
@@ -955,7 +1029,30 @@ def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
     """يُعيد قاموساً آمناً يحتوي على التوكنات وأعمدة التقطير عند توفرها."""
     # 30% من الدفعات في المرحلة الثانية تُسحب من بيانات التقطير المعلّمة لتفعيل L_gate و L_KL
     if TRAINING_STAGE == "stage2_hepl_sft" and len(DISTILLED_BUFFER) >= batch_size and torch.rand(1).item() < 0.30:
-        idxs = torch.randint(0, len(DISTILLED_BUFFER), (batch_size,)).tolist()
+        # SAFE-RETRAIN: balanced manifold sampling — pick a manifold first (uniform 25%),
+        # then pick a record from that manifold. This fixes the 85% real imbalance
+        # so L_gate actually learns to route to all 4 manifolds.
+        # Strategy A: balanced 25%/25%/25%/25% (when every manifold has ≥ 30 records)
+        # Strategy B: inverse-frequency weighted (fallback when a manifold is too small)
+        idxs = []
+        if DISTILLED_SAMPLING_WEIGHTS is not None:
+            # Strategy B — inverse-frequency weighted sampling
+            idxs = random.choices(
+                range(len(DISTILLED_BUFFER)),
+                weights=DISTILLED_SAMPLING_WEIGHTS,
+                k=batch_size
+            )
+        else:
+            # Strategy A — pick manifold uniformly, then pick record within manifold
+            for _ in range(batch_size):
+                chosen_manifold = random.randint(0, 3)
+                manifold_pool = MANIFOLD_INDEX[chosen_manifold]
+                if len(manifold_pool) == 0:
+                    # Fallback: pick any record with a valid manifold
+                    valid_manifolds = [m for m in (0, 1, 2, 3) if len(MANIFOLD_INDEX[m]) > 0]
+                    chosen_manifold = random.choice(valid_manifolds)
+                    manifold_pool = MANIFOLD_INDEX[chosen_manifold]
+                idxs.append(random.choice(manifold_pool))
         samples = [DISTILLED_BUFFER[k] for k in idxs]
         input_list, man_list, ids_list, lps_list, mask_list = [], [], [], [], []
         has_distill = True
