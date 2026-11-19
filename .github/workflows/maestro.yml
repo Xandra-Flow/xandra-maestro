@@ -1,4 +1,6 @@
-# Xandra Maestro - كل ساعة (v4.2 - Real-time Discovery Edition)
+# Xandra Maestro - كل 15 دقيقة (v4.3 - Real-time Log Streaming Edition)
+# v4.3 fix: added PYTHONUNBUFFERED + PYTHONIOENCODING so logs stream live.
+# v4.2 already had timeout-minutes: 15 (job was succeeding, just looked frozen).
 name: Xandra Maestro
 
 on:
@@ -47,6 +49,13 @@ jobs:
 
       - name: 🎵 Run Maestro
         env:
+          # 🚨 v4.3 CRITICAL FIX — these two env vars MUST come first:
+          # Without them, GitHub Actions shows maestro.py as "stuck" for the
+          # entire 12-min run because Python buffers stdout until exit.
+          # Confirmed by logs_120558171927: all 46 print() lines appeared at
+          # the SAME timestamp (14:04:52.735) after a 12-min silent gap.
+          PYTHONUNBUFFERED: '1'
+          PYTHONIOENCODING: utf-8
           HF_REPO: ${{ secrets.HF_REPO }}
           HF_TOKEN_OWNER: ${{ secrets.HF_TOKEN_OWNER }}
           # 🔑 New API Tokens (KGAT_ format) — from kaggle.com/settings/api
