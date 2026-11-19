@@ -539,7 +539,11 @@ class SparseTopKDistillationLoss(nn.Module):
             p_teacher_other = (1.0 - t_sum).clamp(min=0.0)
 
             s_probs_full = F.softmax(s_logits, dim=-1)
-            s_probs_k = torch.gather(s_probs_full, dim=-1, index=teacher_top_ids.long())
+            vocab_limit = s_probs_full.size(-1)
+            in_bounds = (teacher_top_ids >= 0) & (teacher_top_ids < vocab_limit)
+            safe_ids = teacher_top_ids.long().clamp(0, vocab_limit - 1)
+            s_probs_k = torch.gather(s_probs_full, dim=-1, index=safe_ids) * in_bounds.float()
+            t_probs_k = t_probs_k * in_bounds.float()
             p_student_other = (1.0 - s_probs_k.sum(dim=-1, keepdim=True)).clamp(min=0.0)
 
             s_probs_k_safe = s_probs_k + 1e-8
