@@ -633,7 +633,6 @@ else:
             last_step = load_checkpoint(model, timeout_seconds=180)
         except Exception:
             last_step = 0
-        # إذا كانت هذه أول خطوة في المرحلة 2، نفّذ النسخ الجراحي من base_150k.pt
         if last_step <= 150000:
             base_path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/base_150k.pt", repo_type="model", token=HF_TOKEN)
             model = graft_from_xandra_modern(model, base_path, sigma=0.001, device=device)
@@ -878,9 +877,51 @@ else:
 TEXT_BUFFER = []
 BUFFER_SIZE = 2500
 STREAM_ITER = None
+DISTILLED_BUFFER = []
+
+def load_distilled_records():
+    """يسحب سجلات التقطير المعرفي من مجلد distilled/ بشكل مستقل لتجنب تعارض الأعمدة."""
+    global DISTILLED_BUFFER
+    if DISTILLED_BUFFER or globals().get("TRAINING_STAGE") != "stage2_hepl_sft":
+        return
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_TOKEN)
+        files = api.list_repo_files(repo_id="smart-force/xandra-sft-corpus", repo_type="dataset")
+        parquet_files = [f for f in files if f.startswith("distilled/") and f.endswith(".parquet")]
+        for pf in parquet_files[:10]:
+            local_pq = hf_hub_download(
+                repo_id="smart-force/xandra-sft-corpus",
+                filename=pf,
+                repo_type="dataset",
+                token=HF_TOKEN
+            )
+            df_pq = pd.read_parquet(local_pq)
+            for _, row in df_pq.iterrows():
+                txt = str(row.get("text", "")).strip()
+                if len(txt) < 30:
+                    continue
+                try:
+                    t_ids = json.loads(row["teacher_top32_ids"]) if isinstance(row.get("teacher_top32_ids"), str) else None
+                    t_lps = json.loads(row["teacher_top32_logprobs"]) if isinstance(row.get("teacher_top32_logprobs"), str) else None
+                    t_man = int(row["target_manifold"]) if pd.notna(row.get("target_manifold")) else None
+                except Exception:
+                    t_ids, t_lps, t_man = None, None, None
+                DISTILLED_BUFFER.append({
+                    "text": txt,
+                    "target_manifold": t_man,
+                    "teacher_top32_ids": t_ids,
+                    "teacher_top32_logprobs": t_lps
+                })
+        if DISTILLED_BUFFER:
+            print(f"🎓 تم تحميل {len(DISTILLED_BUFFER):,} سجل تقطير معرفي من مجلد distilled/ بنجاح!")
+    except Exception as e:
+        print(f"⚠️ تعذر تحميل سجلات التقطير الجانبية (سيستمر التدريب بالبيانات الأساسية): {e}")
+
+load_distilled_records()
 
 def refill_text_buffer():
-    """يسحب دفعة جديدة بالتسلسل دون إعادة الاتصال من البداية أو تكرار أوائل الملفات."""
+    """يسحب دفعة جديدة بالتسلسل دون إعادة الاتصال من البداية."""
     global TEXT_BUFFER, STREAM_ITER
     if not STREAMING_READY:
         return
@@ -888,8 +929,7 @@ def refill_text_buffer():
         if STREAM_ITER is None:
             shuffled = combined_stream.shuffle(seed=int(time.time()), buffer_size=5000)
             STREAM_ITER = iter(shuffled)
-        
-        # تفريغ النصوص القديمة المستهلكة قبل تعبئة نصوص جديدة تماماً
+
         TEXT_BUFFER.clear()
         count = 0
         while count < BUFFER_SIZE:
@@ -908,36 +948,62 @@ def refill_text_buffer():
         print(f"⚠️ فشل تعبئة الـ buffer: {e}")
         STREAM_ITER = None
 
-
-# Initial fill
 if STREAMING_READY:
     refill_text_buffer()
 
-
 def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
-    """Returns a tokenized batch. NEVER returns empty — has fallback."""
-    texts = []
+    """يُعيد قاموساً آمناً يحتوي على التوكنات وأعمدة التقطير عند توفرها."""
+    # 30% من الدفعات في المرحلة الثانية تُسحب من بيانات التقطير المعلّمة لتفعيل L_gate و L_KL
+    if TRAINING_STAGE == "stage2_hepl_sft" and len(DISTILLED_BUFFER) >= batch_size and torch.rand(1).item() < 0.30:
+        idxs = torch.randint(0, len(DISTILLED_BUFFER), (batch_size,)).tolist()
+        samples = [DISTILLED_BUFFER[k] for k in idxs]
+        input_list, man_list, ids_list, lps_list, mask_list = [], [], [], [], []
+        has_distill = True
+        for s in samples:
+            toks = tokenizer(s["text"], return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0]
+            input_list.append(toks)
+            if s["target_manifold"] is not None and s["teacher_top32_ids"] is not None and s["teacher_top32_logprobs"] is not None:
+                man_list.append(s["target_manifold"])
+                # محاذاة طول Top-32 مع max_len بدقة
+                raw_ids = s["teacher_top32_ids"][:max_len]
+                raw_lps = s["teacher_top32_logprobs"][:max_len]
+                valid_len = len(raw_ids)
+                pad_len = max_len - valid_len
+                if pad_len > 0:
+                    raw_ids = raw_ids + [[0] * 32 for _ in range(pad_len)]
+                    raw_lps = raw_lps + [[-100.0] * 32 for _ in range(pad_len)]
+                ids_list.append(raw_ids)
+                lps_list.append(raw_lps)
+                m_row = [1.0] * valid_len + [0.0] * pad_len
+                mask_list.append(m_row)
+            else:
+                has_distill = False
 
-    # Method 1: Try streaming buffer first (70% of the time)
+        if has_distill:
+            return {
+                "input_ids": torch.stack(input_list),
+                "target_manifold": torch.tensor(man_list, dtype=torch.long),
+                "teacher_top32_ids": torch.tensor(ids_list, dtype=torch.long),
+                "teacher_top32_logprobs": torch.tensor(lps_list, dtype=torch.float32),
+                "response_mask": torch.tensor(mask_list, dtype=torch.float32)
+            }
+
+    texts = []
     use_stream = STREAMING_READY and len(TEXT_BUFFER) > 0 and torch.rand(1).item() < 0.7
     if use_stream:
-        # Pick random texts from the buffer
         indices = torch.randint(0, len(TEXT_BUFFER), (batch_size,))
         for idx in indices:
             texts.append(TEXT_BUFFER[idx])
 
-    # Method 2: Fill remaining from local texts
     if len(texts) < batch_size and len(all_texts) > 0:
         needed = batch_size - len(texts)
         indices = torch.randint(0, len(all_texts), (needed,))
         for idx in indices:
             texts.append(all_texts[idx])
 
-    # Method 3: Refill buffer if it's running low
     if STREAMING_READY and len(TEXT_BUFFER) < 100:
         refill_text_buffer()
 
-    # Method 4: الانتظار وإعادة المحاولة من السحابة (ممنوع استخدام بيانات احتياطية مكررة)
     while len(texts) == 0:
         print("⏳ انتظار تعبئة البيانات من المستودعات السحابية...")
         refill_text_buffer()
@@ -948,13 +1014,11 @@ def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
         else:
             time.sleep(10)
 
-
-    # Tokenize all texts
     batch = []
     for text in texts:
         tokens = tokenizer(text, return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0]
         batch.append(tokens)
-    return torch.stack(batch)
+    return {"input_ids": torch.stack(batch)}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1108,7 +1172,12 @@ try:
             break
 
         try:
-            batch = prefetcher.get().to(device, non_blocking=True)
+            raw_batch = prefetcher.get()
+            batch = raw_batch["input_ids"].to(device, non_blocking=True)
+            t_manifold = raw_batch["target_manifold"].to(device, non_blocking=True) if "target_manifold" in raw_batch else None
+            t_top_ids = raw_batch["teacher_top32_ids"].to(device, non_blocking=True) if "teacher_top32_ids" in raw_batch else None
+            t_top_lps = raw_batch["teacher_top32_logprobs"].to(device, non_blocking=True) if "teacher_top32_logprobs" in raw_batch else None
+            resp_mask = raw_batch["response_mask"].to(device, non_blocking=True) if "response_mask" in raw_batch else None
         except Exception as e:
             print(f"⚠️ تخطّي batch بسبب خطأ: {e}")
             continue
@@ -1133,11 +1202,14 @@ try:
                 stage2_step = max(0, step - 150000)
                 out_dict = model(
                     batch, targets=batch, step=stage2_step,
+                    target_manifold=t_manifold
                 )
                 l_sft  = out_dict["l_sft"].mean()  if (out_dict["l_sft"]  is not None and out_dict["l_sft"].ndim  > 0) else (out_dict["l_sft"]  if out_dict["l_sft"]  is not None else torch.tensor(0.0, device=device))
-                l_bal  = out_dict["l_bal"].mean()  if out_dict["l_bal"].ndim > 0 else out_dict["l_bal"]
+                l_bal  = out_dict["l_bal"].mean()  if out_dict["l_bal"].ndim  > 0 else out_dict["l_bal"]
                 l_gate = out_dict["l_gate"].mean() if out_dict["l_gate"].ndim > 0 else out_dict["l_gate"]
                 l_kl   = torch.tensor(0.0, device=device)
+                if kl_loss_fn is not None and t_top_ids is not None and out_dict.get("logits") is not None:
+                    l_kl = kl_loss_fn(out_dict["logits"], t_top_ids, t_top_lps, resp_mask)
                 beta  = 0.05 if stage2_step >= 1000 else 0.0
                 gamma = 0.50 if stage2_step >= 2000 else 0.0
                 alpha_w = hepl_telemetry.alpha_bal if hepl_telemetry else 0.01
@@ -1214,8 +1286,8 @@ try:
         step += 1
         losses.append(loss.item() * GRAD_ACCUM_STEPS)
 
-        if TRAINING_STAGE in ("stage3_memory_b", "stage4_ldr") and step >= MAX_STEPS:
-            print(f"🎯 اكتملت معايرة المرحلة الثالثة بنجاح عند الخطوة {step:,} — إنهاء نظيف!")
+        if TRAINING_STAGE in ("stage2_hepl_sft", "stage3_memory_b", "stage4_ldr") and step >= MAX_STEPS:
+            print(f"🎯 اكتملت معايرة المرحلة ({TRAINING_STAGE}) بنجاح عند الخطوة {step:,} — إنهاء نظيف!")
             break
 
         if i % 10 == 0:
