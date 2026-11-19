@@ -473,14 +473,12 @@ class XandraHEPL(nn.Module):
                 l_gate = F.nll_loss(torch.log(seq_gate_probs), target_manifold.long())
 
         return {
-            "logits": None if self.training else logits,
+            "logits": logits if (not self.training or target_manifold is not None) else None,
             "l_sft": l_sft,
             "l_bal": total_l_bal,
             "l_gate": l_gate,
             "avg_soft_probs": avg_soft_probs,
-            # SAFE-RETRAIN: scalar tensor of M_real norm averaged across all
-            # layers (per-batch). DataParallel-safe — gathered from replicas.
-            "m_real_norm": m_real_norm_tensor[0].detach()
+            "m_real_norm": m_real_norm_tensor[0]
         }
 
     def fluency_probe(self) -> float:
