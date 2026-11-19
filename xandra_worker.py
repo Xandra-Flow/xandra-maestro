@@ -919,8 +919,17 @@ def load_distilled_records():
         from huggingface_hub import HfApi
         api = HfApi(token=HF_TOKEN)
         files = api.list_repo_files(repo_id="smart-force/xandra-sft-corpus", repo_type="dataset")
-        parquet_files = [f for f in files if f.startswith("distilled/") and f.endswith(".parquet")]
-        for pf in parquet_files[:10]:
+        parquet_files = sorted([f for f in files if f.startswith("distilled/") and f.endswith(".parquet")])
+        # SAFE-RETRAIN v9.1: load ALL distilled parquet files (no slicing).
+        # Old [:10] dropped new files when the repo grew past 10.
+        # Gemini's [-12:] suggestion is WORSE: alphabetical sort puts
+        # 'distilled_balanced_*' (b) before 'distilled_colab_*' (c), so [-12:]
+        # would KEEP old colab files and DROP the newest balanced files.
+        # Solution: load everything; rely on the bad-row filter + balanced
+        # sampler to handle quantity. 15 files × ~250 rows = ~3,750 rows,
+        # trivial in memory (~3 MB after filtering).
+        print(f"   📥 سيتم تحميل {len(parquet_files)} ملف parquet من distilled/")
+        for pf in parquet_files:
             local_pq = hf_hub_download(
                 repo_id="smart-force/xandra-sft-corpus",
                 filename=pf,
