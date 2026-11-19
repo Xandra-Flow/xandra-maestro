@@ -804,6 +804,7 @@ if TRAINING_STAGE in ("stage2_hepl_sft", "stage3_memory_b", "stage4_ldr"):
         "sources": [
             {"name": "Xandra-SFT-Corpus", "type": "stream",
              "path": "smart-force/xandra-sft-corpus",
+             "data_files": "data/*.parquet",
              "split": "train", "field": "text", "weight": 1.0}
         ]
     }
@@ -857,9 +858,9 @@ for source in sources_config["sources"]:
         elif source["type"] == "stream":
             print(f"🌐 تحميل بيانات Streaming: {source['name']}")
             if "config" in source:
-                ds = load_dataset(source["path"], source["config"], split=source["split"], streaming=True)
+                ds = load_dataset(source["path"], source["config"], data_files=source.get("data_files"), split=source["split"], streaming=True)
             else:
-                ds = load_dataset(source["path"], split=source["split"], streaming=True)
+                ds = load_dataset(source["path"], data_files=source.get("data_files"), split=source["split"], streaming=True)
             stream_datasets.append(ds)
             stream_weights.append(source["weight"])
     except Exception as e:
@@ -1066,7 +1067,7 @@ def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
         input_list, man_list, ids_list, lps_list, mask_list = [], [], [], [], []
         has_distill = True
         for s in samples:
-            toks = tokenizer(s["text"], return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0]
+            toks = tokenizer(s["text"], return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0].clamp(0, VOCAB_SIZE - 1)
             input_list.append(toks)
             if s["target_manifold"] is not None and s["teacher_top32_ids"] is not None and s["teacher_top32_logprobs"] is not None:
                 man_list.append(s["target_manifold"])
@@ -1122,7 +1123,7 @@ def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
 
     batch = []
     for text in texts:
-        tokens = tokenizer(text, return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0]
+        tokens = tokenizer(text, return_tensors='pt', padding='max_length', truncation=True, max_length=max_len)['input_ids'][0].clamp(0, VOCAB_SIZE - 1)
         batch.append(tokens)
     return {"input_ids": torch.stack(batch)}
 
