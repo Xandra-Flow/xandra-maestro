@@ -16,7 +16,54 @@ UPGRADE NOTES (v4.1 → v4.2):
 - Reduced LOCK_TIMEOUT_HOURS from 8 → 12 (safety net only, since real status is checked)
 - Added MAX_LOCK_STALE_HOURS: if lock has been held > N hours AND kernel is dead,
   force-release the lock automatically (auto-recovery from crashed workers)
+
+UPGRADE NOTES (v4.2 → v4.3 — REAL-TIME LOG FIX):
+- ROOT CAUSE FOUND in logs_120558171927: all 46 print() lines appeared at the
+  SAME timestamp (14:04:52) after a 12-minute silent gap. The job was actually
+  succeeding ("✅ اكتملت المهمة. حالة التقدم: ناجح") but visually appeared
+  FROZEN because Python was buffering stdout until process exit.
+- FIX: force unbuffered stdout at the very top of the file, BEFORE any import
+  that could write to stdout. Two layers:
+    1. os.environ PYTHONUNBUFFERED (for any subprocess we spawn, e.g. kaggle CLI)
+    2. sys.stdout / sys.stderr reconfigure(line_buffering=True) — Python 3.7+
+       This makes every print() flush immediately, so the GitHub Actions UI
+       streams logs in real time instead of dumping them all at the end.
+- No change to the verify_kaggle_running timing (360s + 360s) — that was NOT
+  the bug; the bug was purely cosmetic (invisible progress).
+- maestro.yml already had timeout-minutes: 15 (verified in upload), so the job
+  never actually timed out. The "stuck" perception came from buffering alone.
 """
+
+# ═══════════════════════════════════════════════════════════════
+# 🚨 CRITICAL: Force unbuffered stdout/stderr — MUST be the FIRST thing
+# ═══════════════════════════════════════════════════════════════
+# Without this, GitHub Actions shows the maestro job as "stuck" for the
+# entire 12-min run because Python buffers stdout until process exit.
+# All 46 print() lines then dump at the same timestamp at the end.
+# This is exactly what logs_120558171927 revealed (2026-11-19 13:52→14:04).
+import os as _os
+import sys as _sys
+_os.environ.setdefault("PYTHONUNBUFFERED", "1")
+_os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+# Python 3.7+ reconfigure() — makes every print() line-buffered (flush on \n)
+try:
+    _sys.stdout.reconfigure(line_buffering=True, encoding="utf-8")
+    _sys.stderr.reconfigure(line_buffering=True, encoding="utf-8")
+except (AttributeError, ValueError):
+    # Fallback for very old Python — flush manually after every print
+    class _FlushWrapper:
+        def __init__(self, stream):
+            self._s = stream
+        def write(self, data):
+            self._s.write(data)
+            if "\n" in data:
+                self._s.flush()
+        def flush(self):
+            self._s.flush()
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+    _sys.stdout = _FlushWrapper(_sys.stdout)
+    _sys.stderr = _FlushWrapper(_sys.stderr)
 
 import os
 import sys
@@ -1204,30 +1251,53 @@ def launch_kaggle_notebook(account):
 def verify_kaggle_running(expected_step, wait_sec=300):
     """
     Waits for some time, then checks the notebook's progress.
-    
+
     Two-phase check:
     Phase 1 (after 6 min): Look for "I'm alive" signal in state.json.
                           If present → notebook booted, still loading checkpoint.
     Phase 2 (after 12 min): Check if current_step increased.
                           If yes → training actually started.
                           If no → notebook likely crashed at startup.
+
+    v4.3: prints a heartbeat every 30s during each sleep so the GitHub
+    Actions log shows live progress instead of 6 minutes of dead silence
+    (which previously made the job LOOK frozen even though it was working).
     """
     import time as _time
-    
+
+    def _sleep_with_heartbeat(total_seconds, label, interval=30):
+        """Sleep while printing a periodic heartbeat so the log stays alive."""
+        elapsed = 0
+        while elapsed < total_seconds:
+            chunk = min(interval, total_seconds - elapsed)
+            _time.sleep(chunk)
+            elapsed += chunk
+            if elapsed < total_seconds:
+                remaining = total_seconds - elapsed
+                # Convert to m:ss for readability
+                mm, ss = divmod(remaining, 60)
+                print(f"   💤 {label}: {elapsed}/{total_seconds}s — متبقي {mm:d}:{ss:02d}")
+                try: sys.stdout.flush()
+                except Exception: pass
+
     # Phase 1: Wait 6 min, check for "booted" signal
     print(f"⏱️ المرحلة 1: الانتظار 360 ثانية للتأكد من boot الـ notebook...")
-    _time.sleep(360)
-    
+    try: sys.stdout.flush()
+    except Exception: pass
+    _sleep_with_heartbeat(360, "Phase 1")
+
     new_state = get_state()
     notebook_status = new_state.get('notebook_status', {})
     new_step = new_state.get('current_step', 0)
     last_heartbeat = new_state.get('training_lock', {}).get('last_heartbeat')
-    
+
     # Check if "I'm alive" signal was received
     if notebook_status.get('phase') == 'booted' or last_heartbeat:
         print(f"   ✅ Notebook booted بنجاح (signal: {notebook_status.get('phase', 'unknown')})")
         print(f"   ⏳ المرحلة 2: انتظار 360 ثانية إضافية للتحقق من بدء التدريب...")
-        _time.sleep(360)
+        try: sys.stdout.flush()
+        except Exception: pass
+        _sleep_with_heartbeat(360, "Phase 2")
         
         # Phase 2: Check if step increased
         new_state = get_state()
