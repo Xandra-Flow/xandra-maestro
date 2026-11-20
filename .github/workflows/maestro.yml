@@ -1,11 +1,16 @@
-# Xandra Maestro - كل 15 دقيقة (v4.3 - Real-time Log Streaming Edition)
+# Xandra Maestro - كل 30 دقيقة (v4.4 - Quota-Saving Edition)
+# v4.4 fix: cut cron 15→30 min + timeout 15→14 min to fit GitHub Actions 2,000 free minutes/month.
+#   Old consumption: 2,440 min/month (over 2,000 limit by 440)
+#   New consumption: ~1,720 min/month (safe margin of 280 min)
+#   Why 30 min is enough: gaps between Kaggle sessions are naturally 22-102 min
+#   (mean 62 min), so we catch every session end within ≤30 min of it happening.
 # v4.3 fix: added PYTHONUNBUFFERED + PYTHONIOENCODING so logs stream live.
 # v4.2 already had timeout-minutes: 15 (job was succeeding, just looked frozen).
 name: Xandra Maestro
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 # مطلوب للحصول على صلاحية dispatch للـ PAT المستخدم في Cloudflare Worker
@@ -16,7 +21,7 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 14  # v4.4: 14 min caps billing; verify_kaggle_running needs 12 min (Phase 1 + 2), +2 min buffer for setup/email
 
     steps:
       - name: 📥 Checkout
