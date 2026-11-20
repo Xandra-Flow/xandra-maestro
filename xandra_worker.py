@@ -890,6 +890,45 @@ _BAD_PREFIXES = ("[DETERMINISTIC]", "[INTUITIVE]", "[IMAGINATIVE]", "[RATIONAL]"
 _NO_QUESTION_MARKERS = ("لم تقدم سؤال", "لم تطرح سؤال", "بالطبع، ولكن يبدو أنك لم",
                         "يبدو أنك لم تقدم", "لم تقدم أي سؤال", "لم تذكر أي سؤال")
 
+# SAFE-RETRAIN v9.2: OCR-glued Arabic words filter
+# Source: data/*.parquet contains OCR-converted text where Arabic words are
+# concatenated without spaces (e.g. "لقدأصبحارجلين" instead of "لقد أصبح رجلين").
+# Training on such text makes the model reproduce glued output at inference.
+# Solution: reject any text where the ratio of glued words (len > 12 chars) exceeds 15%.
+OCR_GLUE_MAX_WORD_LEN = 12      # words longer than this are "glued"
+OCR_GLUE_MAX_RATIO = 0.15       # if glued words > 15% of all words, reject the row
+STREAM_BAD_COUNT = 0            # count of OCR-polluted rows skipped during streaming
+
+# Tokenizer that splits on Arabic punctuation and whitespace; safe for mixed AR/EN text
+_AR_PUNCT = ".,،؛:!?()[]{}«»\"'\u060c\u061b\u061f\u066b\u066a "
+
+def _is_bad_stream_row(text):
+    """Returns True if the streaming row is malformed (too short, or OCR-glued Arabic)."""
+    global STREAM_BAD_COUNT
+    if text is None:
+        return True
+    try:
+        if isinstance(text, float) and math.isnan(text):
+            return True
+    except TypeError:
+        pass
+    s = str(text).strip()
+    if len(s) < 60:
+        return True
+    # Skip ChatML tag prefixes that leaked into the streaming text
+    if s.startswith("<|im_start|>") and "assistant" not in s[:30].lower():
+        return True
+    # OCR glued-words detection: tokenize on whitespace + Arabic punctuation,
+    # then count how many tokens are unusually long (likely missing spaces).
+    words = [w for w in s.translate(str.maketrans(_AR_PUNCT, " " * len(_AR_PUNCT))).split() if w]
+    if len(words) < 4:
+        return True
+    glued = sum(1 for w in words if len(w) > OCR_GLUE_MAX_WORD_LEN)
+    if glued / len(words) > OCR_GLUE_MAX_RATIO:
+        STREAM_BAD_COUNT += 1
+        return True
+    return False
+
 def _is_bad_distilled_row(text):
     """Returns True if the row is malformed (tag prefix, no-question response, too short)."""
     if text is None:
@@ -1021,13 +1060,17 @@ def refill_text_buffer():
                 item = next(STREAM_ITER)
                 text = item.get('text', item.get('content', item.get('nass', '')))
                 if text and len(str(text)) > 50:
+                    # SAFE-RETRAIN v9.2: filter OCR-glued Arabic rows (len>12 glued words)
+                    if _is_bad_stream_row(text):
+                        continue
                     TEXT_BUFFER.append(str(text))
                     count += 1
             except StopIteration:
                 shuffled = combined_stream.shuffle(seed=int(time.time()), buffer_size=5000)
                 STREAM_ITER = iter(shuffled)
         if count > 0:
-            print(f"📦 تم تعبئة الـ buffer بـ {count} نص جديد ومتنوع من الـ stream")
+            extra = f" | 🚫 تخطّي {STREAM_BAD_COUNT} سجل OCR ملتصق" if STREAM_BAD_COUNT > 0 else ""
+            print(f"📦 تم تعبئة الـ buffer بـ {count} نص جديد ومتنوع من الـ stream{extra}")
     except Exception as e:
         print(f"⚠️ فشل تعبئة الـ buffer: {e}")
         STREAM_ITER = None
@@ -1037,8 +1080,10 @@ if STREAMING_READY:
 
 def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN):
     """يُعيد قاموساً آمناً يحتوي على التوكنات وأعمدة التقطير عند توفرها."""
-    # 30% من الدفعات في المرحلة الثانية تُسحب من بيانات التقطير المعلّمة لتفعيل L_gate و L_KL
-    if TRAINING_STAGE == "stage2_hepl_sft" and len(DISTILLED_BUFFER) >= batch_size and torch.rand(1).item() < 0.30:
+    # 50% من الدفعات في المرحلة الثانية تُسحب من بيانات التقطير المعلّمة لتفعيل L_gate و L_KL
+    # SAFE-RETRAIN v9.2: bumped 0.30 → 0.50 because the previous run spent 71% of steps
+    # on non-distilled data, leaving the gate undertrained (L_KL never dropped below 10).
+    if TRAINING_STAGE == "stage2_hepl_sft" and len(DISTILLED_BUFFER) >= batch_size and torch.rand(1).item() < 0.50:
         # SAFE-RETRAIN: balanced manifold sampling — pick a manifold first (uniform 25%),
         # then pick a record from that manifold. This fixes the 85% real imbalance
         # so L_gate actually learns to route to all 4 manifolds.
