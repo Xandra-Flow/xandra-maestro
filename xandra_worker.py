@@ -976,14 +976,31 @@ def load_distilled_records():
                 repo_type="dataset",
                 token=HF_TOKEN
             )
-            df_pq = pd.read_parquet(local_pq)
+            # SAFE-RETRAIN v9.3 FIX-1: file-level guard — one corrupt parquet
+            # used to crash load_distilled_records() and kill the session
+            # (ArrowInvalid was the root cause of the "corrupted files" failure).
+            try:
+                df_pq = pd.read_parquet(local_pq)
+            except Exception as _pq_err:
+                print(f"   ⚠️ تخطّي ملف تالف {pf}: {type(_pq_err).__name__} — التدريب يستمر بالملفات السليمة")
+                continue
             for _, row in df_pq.iterrows():
+                # SAFE-RETRAIN v9.3 FIX-2: schema fallback — distill_sft.py
+                # writes prompt+cot_response with NO 'text' column; without
+                # this merge the worker skipped 100% of such files and
+                # DISTILLED_BUFFER stayed empty (L_gate/L_KL never activated).
                 txt = str(row.get("text", "")).strip()
+                if not txt:
+                    _p = str(row.get("prompt", "")).strip()
+                    _c = str(row.get("cot_response", "")).strip()
+                    if _p or _c:
+                        txt = (_p + "\n" + _c).strip()
+                txt = txt.strip()
                 if len(txt) < 30:
                     continue
                 # SAFE-RETRAIN: skip malformed rows (tag prefixes, no-question responses)
                 global DISTILLED_BAD_COUNT
-                if _is_bad_distilled_row(row.get("text")):
+                if _is_bad_distilled_row(txt):
                     DISTILLED_BAD_COUNT += 1
                     continue
                 try:
@@ -1055,10 +1072,23 @@ def refill_text_buffer():
 
         TEXT_BUFFER.clear()
         count = 0
-        while count < BUFFER_SIZE:
+        _attempts = 0
+        _max_attempts = BUFFER_SIZE * 20  # safety valve: break after 20× empty passes
+        while count < BUFFER_SIZE and _attempts < _max_attempts:
+            _attempts += 1
             try:
                 item = next(STREAM_ITER)
-                text = item.get('text', item.get('content', item.get('nass', '')))
+                # STREAM-FIX: same prompt+cot_response fallback as load_distilled_records
+                # (data/*.parquet from distill_sft.py has NO 'text' column — without this
+                # merge the streaming buffer stays empty and refill loops forever, burning
+                # GPU hours silently. Same bug class as SAFE-RETRAIN v9.3 FIX-2 line 992.)
+                text = item.get('text') or item.get('content') or item.get('nass')
+                if not text:
+                    _p = str(item.get('prompt', '') or item.get('question', '') or '').strip()
+                    _c = str(item.get('cot_response', '') or item.get('response', '')
+                              or item.get('answer', '') or '').strip()
+                    if _p or _c:
+                        text = (_p + "\n" + _c).strip()
                 if text and len(str(text)) > 50:
                     # SAFE-RETRAIN v9.2: filter OCR-glued Arabic rows (len>12 glued words)
                     if _is_bad_stream_row(text):
@@ -1071,9 +1101,20 @@ def refill_text_buffer():
         if count > 0:
             extra = f" | 🚫 تخطّي {STREAM_BAD_COUNT} سجل OCR ملتصق" if STREAM_BAD_COUNT > 0 else ""
             print(f"📦 تم تعبئة الـ buffer بـ {count} نص جديد ومتنوع من الـ stream{extra}")
+        else:
+            print(f"⚠️ تعذّر تعبئة buffer الـ streaming بعد {_attempts} محاولة — "
+                  f"ستُسحب كل الدفعات من distilled/ (schema غير متوقع في data/*.parquet)")
+            # STREAM-FIX DIAG: print actual schema so we know what to fix next time
+            try:
+                _probe = next(iter(combined_stream.shuffle(seed=42, buffer_size=10)))
+                print(f"   🔍 أعمدة data/*.parquet الفعلية: {list(_probe.keys())}")
+            except Exception as _pe:
+                print(f"   🔍 تعذّر استكشاف schema: {_pe}")
+            STREAMING_READY = False
     except Exception as e:
         print(f"⚠️ فشل تعبئة الـ buffer: {e}")
         STREAM_ITER = None
+        STREAMING_READY = False
 
 if STREAMING_READY:
     refill_text_buffer()
