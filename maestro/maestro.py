@@ -77,7 +77,10 @@ from datetime import datetime, timedelta, timezone
 from huggingface_hub import hf_hub_download, upload_file
 
 HF_REPO = os.environ.get("HF_REPO")
-HF_TOKEN = os.environ.get("HF_TOKEN_OWNER")
+# 🔑 إصلاح rev3 (2026-11-23): قراءة مرنة للسر — HF_TOKEN_OWNER (المُسمّى في maestro.yml)
+# أو HF_TOKEN (اسم بديل شائع). هذا يمنع حقن "" في xandra_worker.py عندما يكون
+# اسم السر في GitHub Secrets مختلفاً عمّا يتوقعه maestro.py.
+HF_TOKEN = (os.environ.get("HF_TOKEN_OWNER") or os.environ.get("HF_TOKEN") or "").strip()
 
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_PASS = os.environ.get("GMAIL_PASS")
