@@ -64,7 +64,14 @@ KAGGLE_USERNAME = "__KAGGLE_USERNAME_VALUE__"
 INJECTED_HF_TOKEN = "__HF_TOKEN_VALUE__"
 INJECTED_HF_REPO = "__HF_REPO_VALUE__"
 
-HF_TOKEN = INJECTED_HF_TOKEN if INJECTED_HF_TOKEN != "__HF_TOKEN_VALUE__" else os.environ.get("HF_TOKEN", "")
+HF_TOKEN = (INJECTED_HF_TOKEN if INJECTED_HF_TOKEN != "__HF_TOKEN_VALUE__" else os.environ.get("HF_TOKEN", "")).strip()
+if not HF_TOKEN:
+    try:
+        from kaggle_secrets import UserSecretsClient
+        HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN").strip()
+    except Exception:
+        pass
+os.environ["HF_TOKEN"] = HF_TOKEN
 HF_REPO = INJECTED_HF_REPO if INJECTED_HF_REPO != "__HF_REPO_VALUE__" else os.environ.get("HF_REPO", "smart-force/xandra-core-private")
 HEPL_REPO = "smart-force/xandra-core-private"   # مستودع hepl_architecture.py
 
