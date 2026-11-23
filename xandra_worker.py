@@ -129,13 +129,13 @@ HEARTBEAT_EVERY_STEPS = 1000
 
 # 🚀 Training hyperparameters — OPTIMIZED
 MAX_STEPS = 1000000
-BATCH_SIZE = 2                # rev5 — was 8 → CUDA OOM at Step 150,003 (per Gemini v4)
+BATCH_SIZE = 2                # rev6 — was 8 → CUDA OOM at Step 150,003 (per Gemini v4)
                               # 2 لكل GPU × 2 GPU (DataParallel) = 4 (فعلي)، أقل من 6.5 GB VRAM
 MAX_LEN = 512                  # 🚀 2x longer context with RoPE!
 LEARNING_RATE = 3e-4
 SAVE_EVERY = 1000
 MAX_TIME_MINUTES = 570  # 9:30 ساعات بالضبط للاستفادة المثلى من باقة الـ 30 ساعة
-GRAD_ACCUM_STEPS = 32          # rev5 — was 16 → effective batch = 2 × 2 GPU × 32 = 128 (مطابق تماماً)
+GRAD_ACCUM_STEPS = 32          # rev6 — was 16 → effective batch = 2 × 2 GPU × 32 = 128 (مطابق تماماً)
 USE_MIXED_PRECISION = True
 USE_TORCH_COMPILE = False      # Disabled — can fail on Kaggle environment
 USE_GRADIENT_CHECKPOINTING = False   # 🆕 allows bigger model in limited VRAM
@@ -636,7 +636,7 @@ else:
         except Exception:
             last_step = 0
         if last_step <= 150100:
-            # rev5 — was 150000 → يَمنع الاستئناف الوهمي بعد الانهيار المُبكّر (per Gemini v4)
+            # rev6 — was 150000 → يَمنع الاستئناف الوهمي بعد الانهيار المُبكّر (per Gemini v4)
             # latest.pt عند 150,002 ليس "تقدماً حقيقياً" — الأفضل البدء من base_150k.pt
             base_path = hf_hub_download(repo_id=HF_REPO, filename="checkpoints/base_150k.pt", repo_type="model", token=HF_TOKEN)
             model = graft_from_xandra_modern(model, base_path, sigma=0.001, device=device)
@@ -898,7 +898,7 @@ _NO_QUESTION_MARKERS = ("لم تقدم سؤال", "لم تطرح سؤال", "ب�
 # concatenated without spaces (e.g. "لقدأصبحارجلين" instead of "لقد أصبح رجلين").
 # Training on such text makes the model reproduce glued output at inference.
 # Solution: reject any text where the ratio of glued words (len > 12 chars) exceeds 15%.
-OCR_GLUE_MAX_WORD_LEN = 18      # rev5 — was 12 → رفض كلمات إنجليزية طبيعية (per Gemini v4)
+OCR_GLUE_MAX_WORD_LEN = 18      # rev6 — was 12 → رفض كلمات إنجليزية طبيعية (per Gemini v4)
                               # 18 يَسمح بِـ implementation(14), international(13), understanding(13)
                               # ويَكشف التصاق OCR العربي فوق 18 حرفاً
 OCR_GLUE_MAX_RATIO = 0.15       # if glued words > 15% of all words, reject the row
@@ -1067,7 +1067,11 @@ load_distilled_records()
 
 def refill_text_buffer():
     """يسحب دفعة جديدة بالتسلسل دون إعادة الاتصال من البداية."""
-    global TEXT_BUFFER, STREAM_ITER
+    # rev6 — FIX for UnboundLocalError at line 1066 (per log 2026-11-23T20:39)
+    # السبب: STREAMING_READY = False في السطر 1113/1117 (محلّياً) يُحوّلها Python لِمحلّية
+    # في كامل الدالة، فالسطر 1066 `if not STREAMING_READY:` يَحاول قراءتها قبل إسنادها
+    # → UnboundLocalError. الحل: إعلانها global صراحةً.
+    global TEXT_BUFFER, STREAM_ITER, STREAMING_READY, STREAM_BAD_COUNT
     if not STREAMING_READY:
         return
     try:
@@ -1658,7 +1662,7 @@ finally:
 
             state['current_step'] = step
             state['current_loss'] = final_loss
-            # rev5 — was min(state.get('best_loss', float('inf')), final_loss)
+            # rev6 — was min(state.get('best_loss', float('inf')), final_loss)
             # المشكلة: state.get('best_loss', inf) يَرجع None إذا المفتاح موجود بقيمة null
             # → min(None, 3.4749) → TypeError (per Gemini v4, اللوجز السطر 311)
             prev_best = state.get('best_loss')
