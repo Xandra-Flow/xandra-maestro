@@ -64,20 +64,10 @@ KAGGLE_USERNAME = "__KAGGLE_USERNAME_VALUE__"
 INJECTED_HF_TOKEN = "__HF_TOKEN_VALUE__"
 INJECTED_HF_REPO = "__HF_REPO_VALUE__"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 🔑 إصلاح جوهري v10.1 (rev3 — 2026-11-23): حلّ مشكلة "Illegal header value b'Bearer '"
-# ──────────────────────────────────────────────────────────────────────────────
-# السبب الجذري (مُؤكّد من download.txt السطر 6): عندما يكون سر GitHub المُسمّى
-# HF_TOKEN_OWNER فارغاً أو غير موجود، يحقن maestro.py نصاً فارغاً "" في
-# __HF_TOKEN_VALUE__ (السطر 953: worker_code.replace('__HF_TOKEN_VALUE__', HF_TOKEN or ""))
-# فيصبح INJECTED_HF_TOKEN = "" (وليس "__HF_TOKEN_VALUE__")، فيتجاوز الشرط القديم
-# fallback ويترك HF_TOKEN = "" → كل طلبات HF Hub تُرسل "Authorization: Bearer " →
-# httpx.LocalProtocolError: Illegal header value b'Bearer '.
-#
-# الحل: معاملة "" و None كقيم "غير مُحقونة" (مثل "__HF_TOKEN_VALUE__")، فيُسقط
-# الكود لِـ fallback التسلسلي: os.environ → kaggle_secrets → RuntimeError واضح.
-# ──────────────────────────────────────────────────────────────────────────────
-_raw_tok = INJECTED_HF_TOKEN if INJECTED_HF_TOKEN not in ("__HF_TOKEN_VALUE__", "", None) else os.environ.get("HF_TOKEN", "")
+_PLACEHOLDER_TOK = "__HF_TOKEN_" + "VALUE__"
+_PLACEHOLDER_REPO = "__HF_REPO_" + "VALUE__"
+
+_raw_tok = INJECTED_HF_TOKEN if INJECTED_HF_TOKEN not in (_PLACEHOLDER_TOK, "", None) else os.environ.get("HF_TOKEN", "")
 HF_TOKEN = str(_raw_tok).strip()
 if not HF_TOKEN:
     try:
@@ -86,13 +76,10 @@ if not HF_TOKEN:
     except Exception:
         pass
 if not HF_TOKEN:
-    raise RuntimeError(
-        "❌ HF_TOKEN فارغ! تأكد من وجود HF_TOKEN_OWNER في GitHub Secrets "
-        "(مستودع Xandra-Flow/xandra-maestro ← Settings → Secrets and variables → Actions) "
-        "أو HF_TOKEN في Kaggle Secrets الخاص بِالـ kernel."
-    )
+    raise RuntimeError("❌ HF_TOKEN فارغ في كل من الحقن و Kaggle Secrets.")
 os.environ["HF_TOKEN"] = HF_TOKEN
-HF_REPO = INJECTED_HF_REPO if INJECTED_HF_REPO != "__HF_REPO_VALUE__" else os.environ.get("HF_REPO", "smart-force/xandra-core-private")
+
+HF_REPO = INJECTED_HF_REPO if INJECTED_HF_REPO not in (_PLACEHOLDER_REPO, "", None) else os.environ.get("HF_REPO", "smart-force/xandra-core-private")
 HEPL_REPO = "smart-force/xandra-core-private"   # مستودع hepl_architecture.py
 
 SESSION_START_TIME = time.time()
