@@ -110,9 +110,9 @@ N_LAYERS         = 8                 # XandraHEPL default
 N_HEADS          = 8                 # query heads
 N_KV_HEADS       = 2                 # GQA — 4x fewer KV projections
 MAX_LEN          = 512               # سياق التدريب
-BATCH_SIZE       = 2                 # Stage 3 (مطابق v10: 2 × 2 GPU × 32 = 128 effective)
+BATCH_SIZE       = 1                 # Stage 3 (مطابق v10: 2 × 2 GPU × 32 = 128 effective)
                                   # 2 × 2 GPU × 32 = 128 effective batch (آمن 100% على T4 x2)
-GRAD_ACCUM_STEPS = 32                # Stage 3 (مطابق v10: effective batch = 2 × 2 × 32 = 128)
+GRAD_ACCUM_STEPS = 64                # Stage 3 (مطابق v10: effective batch = 2 × 2 × 32 = 128)
 PREFETCH_BATCHES = 2
 
 # ─── نقطة الانطلاق والهدف (Stage 4: 183K → 185K = 2,000 خطوة ختامية) ──────────
@@ -493,7 +493,7 @@ class XandraTCAStage4(nn.Module):
         if h is not None:
             probe_out = self.ldr.probe_generator(
                 probe_input_ids=idx,
-                draft_hidden_states=h,
+                draft_hidden_states=h.detach(),
                 probe_targets=idx,
             )
             l_probe = probe_out["l_probe"]
