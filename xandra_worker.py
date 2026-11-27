@@ -115,23 +115,27 @@ BATCH_SIZE       = 2                 # Stage 3 (مطابق v10: 2 × 2 GPU × 32
 GRAD_ACCUM_STEPS = 32                # Stage 3 (مطابق v10: effective batch = 2 × 2 × 32 = 128)
 PREFETCH_BATCHES = 2
 
-# ─── نقطة الانطلاق والهدف (Stage 3: 180K → 183K = 3,000 خطوة) ───────────────
-START_STEP       = 180_000           # step_180000.pt (نهاية المرحلة الثانية)
-TARGET_STEP      = 183_000           # +3,000 خطوة نظيفة (Memory B + Specialty Distillation)
-WARMUP_STEPS     = 200               # 1e-6 → LR_PEAK (إحماء أقصر — backbone مُدرب مسبقاً)
-SAVE_EVERY       = 1_000             # checkpoint كل 1K (مطابق Stage 3 Spec)
-TELEMETRY_EVERY  = 250               # مراقبة كل 250 خطوة (مطابق Stage 3 Spec)
+# ─── نقطة الانطلاق والهدف (Stage 4: 183K → 185K = 2,000 خطوة ختامية) ──────────
+START_STEP       = 183_000           # step_183000.pt (نهاية المرحلة الثالثة)
+TARGET_STEP      = 185_000           # +2,000 خطوة ختامية (LDR Referee & Trilingual Polish)
+WARMUP_STEPS     = 150               # 1e-6 → LR_PEAK
+SAVE_EVERY       = 1_000             # checkpoint كل 1K (184K, 185K)
+TELEMETRY_EVERY  = 250               # مراقبة كل 250 خطوة
 
-# ─── معدلات التعلّم التفاضلية (Stage 3 Spec §3) ──────────────────────────────
-LR_BACKBONE      = 1.0e-5            # backbone (165.7M) — تجميد جزئي (10x أقل من v10)
-LR_MEMORY_B      = 5.0e-5            # memory_b (1.05M) — جديد (5x أعلى من backbone)
-LR_WARMUP_START  = 1e-6              # كلا المجموعتين تبدأ من 1e-6 (إحماء مشترك)
+# ─── معدلات التعلّم التفاضلية الثلاثية (Stage 4) ─────────────────────────────
+LR_BACKBONE      = 5.0e-6            # Layer 1 HEPL (تثبيت وحماية)
+LR_MEMORY_B      = 1.0e-5            # Layer 2 Memory B (حفاظ)
+LR_LDR           = 5.0e-5            # Layer 3 LDR Referee (معايرة المسابر النقدية)
+LR_WARMUP_START  = 1e-6
 
-# ─── أوزان معادلة الخسارة (Stage 3 Spec §5) ───────────────────────────────────
-BETA_L_GATE      = 0.05              # beta = 0.05 (مطابق v10)
-GAMMA_L_KL       = 0.35              # gamma = 0.35 (مخفوض من 0.50 في v10 — Stage 3)
-ALPHA_L_BAL      = 0.01              # وزن توازن البوابات (مطابق v10)
-DELTA_L_MEM_CAL  = 0.20              # 🆕 Stage 3: وزن خسارة معايرة انحراف السياق (mem_cal_loss)
+# ─── أوزان معادلة الخسارة (Stage 4) ───────────────────────────────────────────
+BETA_L_GATE      = 0.05
+GAMMA_L_KL       = 0.25
+ALPHA_L_BAL      = 0.01
+DELTA_L_MEM_CAL  = 0.20
+ETA_L_LDR        = 0.25              # وزن خسارة المسابر النقدية ومنع القوالب (LDR)
+LDR_PROBE_DIM    = 256
+LDR_N_LAYERS     = 2
 
 # توزيع البيانات (Stage 3 Spec §4): 70% تخصصي / 30% عام
 DISTILLED_WEIGHT = 0.70              # مرفوع من 50% إلى 70% (تشكيل سلوكي متخصص)
@@ -172,7 +176,7 @@ RATIO_MIN, RATIO_MAX = 0.5, 2.0
 M_REAL_NORM_MIN_RATIO = 0.30         # مطابق v9.1 (يمنع الإنذار الكاذب عند تخصص البوابات)
 
 # وضعية التدريب — Stage 3
-TRAINING_STAGE = "stage3_memory_b_specialty"
+TRAINING_STAGE = "stage4_ldr_referee"
 USE_MIXED_PRECISION = True
 USE_GRADIENT_CHECKPOINTING = True
 USE_TORCH_COMPILE = False            # معطّل — قد يفشل على Kaggle
@@ -377,16 +381,14 @@ def load_hepl_architecture():
     )
     shutil.copy(arch_path, "/tmp/hepl_architecture.py")
 
-    log_step("⬇️  تنزيل memory_b_cdd.py من المستودع الخاص (Stage 3)...")
-    memb_path = hf_hub_download(
-        repo_id=HEPL_REPO, filename="memory_b_cdd.py",
-        repo_type="model", token=HF_TOKEN,
-    )
-    shutil.copy(memb_path, "/tmp/memory_b_cdd.py")
+    log_step("⬇️  تنزيل memory_b_cdd.py و ldr_referee.py من المستودع الخاص (Stage 4)...")
+    for _fn in ("memory_b_cdd.py", "ldr_referee.py"):
+        _p = hf_hub_download(repo_id=HEPL_REPO, filename=_fn, repo_type="model", token=HF_TOKEN)
+        shutil.copy(_p, f"/tmp/{_fn}")
 
     if "/tmp" not in sys.path:
         sys.path.insert(0, "/tmp")
-    log_step("✅ hepl_architecture.py + memory_b_cdd.py جاهزان للاستيراد (Stage 3)")
+    log_step("✅ hepl_architecture.py + memory_b_cdd.py + ldr_referee.py جاهزة (Stage 4)")
 
 
 def load_tokenizer():
@@ -471,6 +473,38 @@ class XandraTCAStage3(nn.Module):
         out["mem_theta_crit"]      = torch.tensor(mb_out.get("theta_crit", MEMB_THETA_CRIT), device=idx.device, dtype=torch.float32)
         return out
 
+class XandraTCAStage4(nn.Module):
+    def __init__(self, stage3_model, ldr_system):
+        super().__init__()
+        self.stage3 = stage3_model
+        self.backbone = stage3_model.backbone
+        self.memory_b = stage3_model.memory_b
+        self.ldr = ldr_system
+        self.head = stage3_model.head
+
+    def forward(self, idx, targets=None, step=0,
+                deterministic_flag=None, target_manifold=None):
+        out = self.stage3(
+            idx, targets=targets, step=step,
+            deterministic_flag=deterministic_flag,
+            target_manifold=target_manifold,
+        )
+        h = out.get("hidden_states")
+        if h is not None:
+            probe_out = self.ldr.probe_generator(
+                probe_input_ids=idx,
+                draft_hidden_states=h,
+                probe_targets=idx,
+            )
+            l_probe = probe_out["l_probe"]
+            l_anti_templ = self.ldr.anti_template_loss(
+                probe_out["probe_logits"], self.ldr.template_prior
+            )
+            out["ldr_loss"] = l_probe + l_anti_templ
+        else:
+            out["ldr_loss"] = torch.tensor(0.0, device=idx.device, dtype=torch.float32)
+        return out
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # الفصل 4 (المرجع): SurgicalWeightGrafter + Pre-flight Checks + Optimizer نظيف
@@ -512,83 +546,39 @@ def pre_flight_checks(checkpoint_path, model):
                  f"(XandraModern ≈ 105.7M) — نتابع بحذر")
     return True
 
-
 def build_fresh_optimizer(model):
-    """
-    Stage 3 Spec §3 — مُحسّن AdamW تفاضلي.
-
-    يَفصل param_groups إلى مجموعتين:
-      • param_groups[0] = backbone.parameters()  → يَصعد من 1e-6 إلى LR_BACKBONE (1e-5)
-      • param_groups[1] = memory_b.parameters()  → يَصعد من 1e-6 إلى LR_MEMORY_B (5e-5)
-    لا وراثة optimizer_state من checkpoint — الزخوم (m, v) تُهيّأ إلى صفر تلقائياً.
-
-    الفهرسة الصريحة optimizer.param_groups[0]['lr'] / [1]['lr'] تُستخدم
-    في حلقة التدريب لِتحديث LR كلّ مجموعة على حدة.
-    """
-    log_step("🧹 تهيئة AdamW تفاضلي (Stage 3: backbone 1e-5 / memory_b 5e-5)...")
+    log_step("🧹 تهيئة AdamW ثلاثي الطبقات (Stage 4: backbone 5e-6 / memory_b 1e-5 / ldr 5e-5)...")
     raw = get_raw_model(model) if hasattr(model, 'module') or hasattr(model, '_orig_mod') else model
-
-    # Stage 3: XandraTCAStage3 يَكشف backbone + memory_b كَسمات
-    if hasattr(raw, 'backbone') and hasattr(raw, 'memory_b'):
-        backbone_params = list(raw.backbone.parameters())
-        memory_b_params = list(raw.memory_b.parameters())
-        n_backbone = sum(p.numel() for p in backbone_params)
-        n_memory_b = sum(p.numel() for p in memory_b_params)
-        log_step(f"   • param_groups[0] backbone: {n_backbone:,} ({n_backbone/1e6:.1f}M) → LR_BACKBONE={LR_BACKBONE}")
-        log_step(f"   • param_groups[1] memory_b: {n_memory_b:,} ({n_memory_b/1e6:.2f}M) → LR_MEMORY_B={LR_MEMORY_B}")
-        optimizer = torch.optim.AdamW(
-            [
-                {"params": backbone_params, "lr": LR_WARMUP_START, "weight_decay": 0.01},
-                {"params": memory_b_params, "lr": LR_WARMUP_START, "weight_decay": 0.01},
-            ],
-            betas=(0.9, 0.95),
-            eps=1e-8,
-        )
-        log_step(f"   ✅ AdamW تفاضلي جاهز: 2 param_groups، lr_start={LR_WARMUP_START}، "
-                 f"betas=(0.9, 0.95)، wd=0.01")
-        return optimizer
-
-    # Fallback (نادر): لو استُدعي قبل بناء XandraTCAStage3 — نمط v10 القديم.
-    log_step("   ⚠️ النموذج ليس XandraTCAStage3 (لا backbone/memory_b) — استخدام AdamW أحادي.")
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=LR_WARMUP_START,
-        betas=(0.9, 0.95),
-        weight_decay=0.01,
-        eps=1e-8,
+    bb_params = list(raw.backbone.parameters())
+    mb_params = list(raw.memory_b.parameters())
+    bb_ids = {id(p) for p in bb_params}
+    ldr_unique = [p for p in raw.ldr.parameters() if p.requires_grad and id(p) not in bb_ids]
+    log_step(f"   • backbone: {sum(p.numel() for p in bb_params):,} | memory_b: {sum(p.numel() for p in mb_params):,} | ldr: {sum(p.numel() for p in ldr_unique):,}")
+    return torch.optim.AdamW(
+        [
+            {"params": bb_params, "lr": LR_WARMUP_START, "weight_decay": 0.01},
+            {"params": mb_params, "lr": LR_WARMUP_START, "weight_decay": 0.01},
+            {"params": ldr_unique, "lr": LR_WARMUP_START, "weight_decay": 0.01},
+        ],
+        betas=(0.9, 0.95), eps=1e-8,
     )
-    log_step(f"   ✅ AdamW أحادي جاهز: lr={LR_WARMUP_START}, betas=(0.9, 0.95), wd=0.01")
-    return optimizer
 
 
 def warmup_lr_schedule(step):
-    """
-    Stage 3: جدولة الإحماء + cosine decay لِمجموعتي AdamW.
-
-    تُعيد زوجاً (lr_backbone, lr_memory_b):
-      • backbone: 1e-6 → LR_BACKBONE (1e-5) خلال WARMUP_STEPS، ثم cosine decay
-      • memory_b: 1e-6 → LR_MEMORY_B (5e-5) خلال WARMUP_STEPS، ثم cosine decay
-    الإحماء مشترك (نفس النسبة) لكن القمّة تختلف.
-
-    ملاحظة: step هنا مطلق (يبدأ من 180,000). نُحوّله إلى stage3_step = step - START_STEP
-    (0 → 3,000) داخل نافذة الإحماء.
-    """
-    import math
-    relative = step - START_STEP           # 0 → 3,000 (Stage 3)
+    relative = step - START_STEP
     if relative < 0:
-        return LR_WARMUP_START, LR_WARMUP_START   # قبل نقطة الانطلاق (لا يجب أن يحدث)
+        return LR_WARMUP_START, LR_WARMUP_START, LR_WARMUP_START
     if relative < WARMUP_STEPS:
-        # نافذة الإحماء الخطية — كلا المجموعتين تَصعد من 1e-6 إلى قمّتها
-        progress = relative / WARMUP_STEPS
-        lr_bb = LR_WARMUP_START + (LR_BACKBONE - LR_WARMUP_START) * progress
-        lr_mb = LR_WARMUP_START + (LR_MEMORY_B - LR_WARMUP_START) * progress
-        return lr_bb, lr_mb
-    # بعد الإحماء: cosine decay من القمّة إلى ~0 عبر (TARGET_STEP - START_STEP) خطوة
+        prog = relative / WARMUP_STEPS
+        return (
+            LR_WARMUP_START + (LR_BACKBONE - LR_WARMUP_START) * prog,
+            LR_WARMUP_START + (LR_MEMORY_B - LR_WARMUP_START) * prog,
+            LR_WARMUP_START + (LR_LDR - LR_WARMUP_START) * prog,
+        )
     total_steps = TARGET_STEP - START_STEP
-    cosine_progress = (relative - WARMUP_STEPS) / max(total_steps - WARMUP_STEPS, 1)
-    cos_factor = 0.5 * (1 + math.cos(math.pi * cosine_progress))
-    return LR_BACKBONE * cos_factor, LR_MEMORY_B * cos_factor
-
+    cos_p = (relative - WARMUP_STEPS) / max(total_steps - WARMUP_STEPS, 1)
+    cos_f = 0.5 * (1.0 + math.cos(math.pi * cos_p))
+    return LR_BACKBONE * cos_f, LR_MEMORY_B * cos_f, LR_LDR * cos_f
 
 def build_scheduler(optimizer):
     """
@@ -681,83 +671,54 @@ def resume_from_latest_checkpoint(model, optimizer):
 
 
 def build_hepl_model(tokenizer, state=None):
-    """
-    بناء XandraTCAStage3 لِلمرحلة الثالثة (Stage 3 Spec §2).
-
-    النموذج الموحَّد يَتألّف من:
-      • XandraHEPL (Layer 1, 165.7M) — backbone، أوزانه من step_180000.pt
-      • XandraMetaMemoryB (Layer 2, 1.05M) — جديد، يُهيّأ عشوائياً
-    الـ wrapper XandraTCAStage3 يُغلِفهما معاً.
-
-    Stage 3 Spec §3 (نقطة البداية والترتيب):
-      1) التحقق أولاً من checkpoints/step_180000.pt (checkpoint صريح عند 180K)
-      2) إن لم يُوجَد، نَتحقق من checkpoints/latest.pt (احتياط)
-      3) نَحسب stage3_step = max(0, current_step - 180_000) داخل حلقة التدريب
-      4) تعطيل apply_surgical_grafting و base_150k.pt بالكامل
-      5) دعم تحميل backbone فقط عند البداية من 180K، أو XandraTCAStage3 كاملاً عند الاستئناف بعد 180K
-    """
     from hepl_architecture import XandraHEPL
     from memory_b_cdd import XandraMetaMemoryB
+    from ldr_referee import XandraLDRSystem
 
-    log_step("🏗️  بناء XandraHEPL backbone (8 طبقات × 4 فضاءات) لِـ Stage 3...")
+    log_step("🏗️  بناء XandraTCAStage4 (Layer 1 HEPL + Layer 2 Memory B + Layer 3 LDR)...")
     backbone = XandraHEPL(
         vocab_size=VOCAB_SIZE, dim=MODEL_DIM, n_layers=N_LAYERS,
         n_heads=N_HEADS, n_kv_heads=N_KV_HEADS, max_seq_len=MAX_LEN,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
     ).to(device)
-    n_backbone = sum(p.numel() for p in backbone.parameters())
-    log_step(f"   نموذج XandraHEPL backbone المُهيّأ: {n_backbone:,} ({n_backbone/1e6:.1f}M)")
-
-    # ─── تحميل أوزان backbone من step_180000.pt (أو latest.pt احتياط) ─────────────
-    # Stage 3 Spec §3: لا grafting، لا base_150k.pt — backbone مُدرب مسبقاً عند 180K.
-    ckpt_info = _load_stage3_backbone_state(backbone, state)
-    resumed_step, ckpt_path = ckpt_info["step"], ckpt_info["path"]
-    state['grafting_applied'] = False                  # Stage 3: لا grafting
-    state['resumed_from'] = resumed_step
-    state['stage3_base_ckpt'] = ckpt_path
-
-    # ─── بناء XandraMetaMemoryB (Layer 2, 1.05M) — جديد لِلمرحلة الثالثة ──────────
-    log_step("🏗️  بناء XandraMetaMemoryB (Layer 2 — CDD + Hierarchical Anchors)...")
     memory_b = XandraMetaMemoryB(
         dim=MEMB_DIM, n_heads=MEMB_N_HEADS,
         window_size=MEMB_WINDOW_SIZE, theta_crit=MEMB_THETA_CRIT,
     ).to(device)
-    n_memb = sum(p.numel() for p in memory_b.parameters())
-    log_step(f"   نموذج XandraMetaMemoryB المُهيّأ: {n_memb:,} ({n_memb/1e6:.2f}M)")
+    stage3_model = XandraTCAStage3(backbone=backbone, memory_b=memory_b).to(device)
+    ldr_system = XandraLDRSystem(
+        vocab_size=VOCAB_SIZE, shared_tok_emb=backbone.tok_emb,
+        base_dim=MODEL_DIM, probe_dim=LDR_PROBE_DIM, n_layers=LDR_N_LAYERS,
+    ).to(device)
+    model = XandraTCAStage4(stage3_model=stage3_model, ldr_system=ldr_system).to(device)
 
-    # ─── تغليف backbone + memory_b بِـ XandraTCAStage3 ──────────────────────────
-    log_step("🔗 تغليف XandraHEPL + XandraMetaMemoryB بِـ XandraTCAStage3 wrapper...")
-    # تَصحيح المُقيِّم 2: نُمرّر memory_b المُنشأ للتوّ مباشرةً (لا يُعاد إنشاؤه داخل
-    # __init__) — لِنَتفادى إنشاء XandraMetaMemoryB مرّتين ولِيَبقى build_hepl_model
-    # مصدر الحقيقة الوحيد لِمعاملات Memory B.
-    model = XandraTCAStage3(backbone=backbone, memory_b=memory_b).to(device)
-    n_total = sum(p.numel() for p in model.parameters())
-    log_step(f"   نموذج XandraTCAStage3 الكلّي: {n_total:,} ({n_total/1e6:.1f}M) "
-             f"(backbone={n_backbone/1e6:.1f}M + memory_b={n_memb/1e6:.2f}M)")
+    loaded = False
+    for ckpt_name in ("checkpoints/step_183000.pt", "checkpoints/latest.pt"):
+        try:
+            p = hf_hub_download(repo_id=HF_REPO, filename=ckpt_name, repo_type="model", token=HF_TOKEN)
+            ckpt = torch.load(p, map_location=device, weights_only=False)
+            c_step = int(ckpt.get("step", START_STEP))
+            if ckpt_name == "checkpoints/latest.pt" and c_step < START_STEP:
+                continue
+            clean_sd = {k.replace("module.", "").replace("_orig_mod.", ""): v for k, v in ckpt["model_state"].items()}
+            if any(k.startswith("stage3.") for k in clean_sd):
+                m_k, _ = model.load_state_dict(clean_sd, strict=False)
+                log_step(f"✅ استئناف XandraTCAStage4 من {ckpt_name} (step={c_step:,}, missing={len(m_k)})")
+            else:
+                m_k, _ = stage3_model.load_state_dict(clean_sd, strict=False)
+                log_step(f"✅ تم تحميل XandraTCAStage3 من {ckpt_name} (step={c_step:,}, missing={len(m_k)}) + تهيئة LDR")
+            state['grafting_applied'] = False
+            state['resumed_from'] = c_step
+            backbone._latest_ckpt_for_opt = p
+            loaded = True
+            break
+        except Exception as e:
+            log_step(f"   ⚠️ تعذر تحميل {ckpt_name}: {e}")
 
-    # ─── إن كنّا نَستأنف بعد 180K (عند 181K مثلاً)، نَحمّل حالة XandraTCAStage3 كاملة ──
-    # Stage 3 Spec §3: «دعم تحميل backbone فقط عند البداية من 180K، أو
-    #                  XandraTCAStage3 كاملاً عند الاستئناف بعد 180K».
-    if resumed_step > START_STEP:
-        log_step(f"📍 الاستئناف بعد 180K (step={resumed_step}) — محاولة تحميل XandraTCAStage3 كاملة...")
-        _load_xandrastage3_full_state(model, state)
+    if not loaded:
+        raise RuntimeError("❌ فشل تحميل step_183000.pt / latest.pt!")
 
-    # ─── فحص forward() — التأكّد من وجود hidden_states و mem_cal_loss ──────────────
-    try:
-        with torch.no_grad():
-            dummy = torch.randint(0, VOCAB_SIZE, (1, 16), device=device)
-            out = model(dummy, step=0)
-        if isinstance(out, dict) and "hidden_states" in out:
-            log_step("✅ XandraTCAStage3.forward() يُعيد hidden_states — تمرير Memory B جاهز")
-        else:
-            log_step("⚠️ XandraTCAStage3.forward() لا يُعيد hidden_states — راجع الـ wrapper")
-        if isinstance(out, dict) and "mem_cal_loss" in out:
-            log_step("✅ XandraTCAStage3.forward() يُعيد mem_cal_loss — خسارة معايرة Stage 3 جاهزة")
-        if isinstance(out, dict) and "routing_shares" in out:
-            log_step("✅ forward() dict يحتوي على routing_shares — التجميع عبر DataParallel جاهز")
-    except Exception as e:
-        log_step(f"⚠️ فشل التحقق من forward() (غير حرج): {e}")
-
+    log_step(f"🧠 إجمالي معاملات Stage 4: {sum(p.numel() for p in model.parameters()):,}")
     return model
 
 
@@ -953,7 +914,7 @@ def setup_combined_stream():
     """
     global combined_stream, STREAMING_READY
     # Stage 3: نَقبل كِلا الوضعيتين (stage2 أو stage3) — مصدر TEXT_BUFFER واحد.
-    if TRAINING_STAGE not in ("stage2_hepl_sft", "stage3_memory_b_specialty"):
+    if TRAINING_STAGE not in ("stage2_hepl_sft", "stage3_memory_b_specialty", "stage4_ldr_referee"):
         STREAMING_READY = False
         return
     sources_config = {
@@ -1091,7 +1052,7 @@ def _is_bad_stream_row(text):
     s = str(text).strip()
     if len(s) < 60:
         return True
-    if s.startswith("<|im_start|>") and "assistant" not in s[:30].lower():
+    if s.startswith("<|im_start|>") and "assistant" not in s[:1500].lower():
         return True
     words = [w for w in s.translate(str.maketrans(_AR_PUNCT, " " * len(_AR_PUNCT))).split() if w]
     if len(words) < 4:
@@ -1234,7 +1195,7 @@ def get_batch(batch_size=BATCH_SIZE, max_len=MAX_LEN, tokenizer=None):
 
     ملاحظة: في Stage 3 نَقبل كِلا الوضعيتين (stage2_hepl_sft أو stage3_memory_b_specialty).
     """
-    if ((TRAINING_STAGE in ("stage2_hepl_sft", "stage3_memory_b_specialty"))
+    if ((TRAINING_STAGE in ("stage2_hepl_sft", "stage3_memory_b_specialty", "stage4_ldr_referee"))
             and len(DISTILLED_BUFFER) >= batch_size
             and tokenizer is not None
             and torch.rand(1).item() < DISTILLED_WEIGHT):   # Stage 3: 0.70 (was 0.50)
@@ -1901,15 +1862,10 @@ def training_loop(model, optimizer, scheduler_fn, tokenizer, state):
             # Stage 3 Spec §3: ضبط LR تفاضلي عبر فهرسة صريحة.
             # scheduler_fn(step) = warmup_lr_schedule تُعيد زوجاً (lr_backbone, lr_memory_b).
             # نُحدّث optimizer.param_groups[0]['lr'] (backbone) و [1]['lr'] (memory_b) صراحةً.
-            lr_bb, lr_mb = scheduler_fn(step)
-            if len(optimizer.param_groups) >= 2:
-                optimizer.param_groups[0]['lr'] = lr_bb    # backbone (1e-5)
-                optimizer.param_groups[1]['lr'] = lr_mb    # memory_b (5e-5)
-                current_lr = lr_bb                           # للعرض (نَعرض LR backbone كَمرجع)
-            else:
-                # fallback: نمط v10 (مجموعة واحدة)
-                optimizer.param_groups[0]['lr'] = lr_bb
-                current_lr = lr_bb
+            lr_bb, lr_mb, lr_ld = scheduler_fn(step)
+            for _pg, _v in zip(optimizer.param_groups, (lr_bb, lr_mb, lr_ld)):
+                _pg['lr'] = _v
+            current_lr = lr_ld
 
             # ─── جلب batch ───
             try:
@@ -1998,19 +1954,22 @@ def training_loop(model, optimizer, scheduler_fn, tokenizer, state):
                 # Stage 3: إحماء أقصر (WARMUP_STEPS=200) لكن نُبقي نفس العتبات النسبية.
                 # beta يُفعّل عند stage3_step ≥ 1000 (لَكنّ WARMUP=200 أقصر،
                 # لذلك beta فاعل من ~step 181K)؛ gamma عند stage3_step ≥ 2000.
-                beta  = BETA_L_GATE  if stage3_step >= 1000 else 0.0
-                gamma = GAMMA_L_KL  if stage3_step >= 2000 else 0.0
-                alpha_w = ALPHA_L_BAL   # ثابت 0.01
+                ldr_l = out_dict.get("ldr_loss", None)
+                if ldr_l is None:
+                    ldr_l = torch.tensor(0.0, device=device)
+                elif ldr_l.ndim > 0:
+                    ldr_l = ldr_l.mean()
 
-                # ─── معادلة الخسارة لِلمرحلة الثالثة (Stage 3 Spec §5) ──────────────
-                # loss = l_sft_resp + (0.01 * l_bal) + (0.05 * l_gate) + (0.35 * l_kl) + (0.20 * mem_cal_loss)
-                # حيث l_sft_resp = compute_response_only_loss(logits, labels, response_mask)
-                # التوزيع 70/30 يحدث في مستوى batch selection (DISTILLED_WEIGHT=0.70).
+                beta  = BETA_L_GATE
+                gamma = GAMMA_L_KL if stage3_step >= 800 else 0.0
+                alpha_w = ALPHA_L_BAL
+
                 loss = (l_sft
                         + (alpha_w * l_bal)
                         + (beta * l_gate)
                         + (gamma * l_kl)
-                        + (delta * mem_cal))
+                        + (delta * mem_cal)
+                        + (ETA_L_LDR * ldr_l))
                 loss = loss / GRAD_ACCUM_STEPS
 
             scaler.scale(loss).backward()
