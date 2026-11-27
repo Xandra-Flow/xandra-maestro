@@ -466,9 +466,9 @@ class XandraTCAStage3(nn.Module):
         out["hidden_states"] = steered_h    # التمثيل المُعدَّل (بعد Memory B)
         out["mem_cal_loss"] = mem_cal_loss  # 🆕 Stage 3: خسارة معايرة انحراف السياق
         # معلومات تشخيصيّة إضافية من Memory B:
-        out["mem_mean_dispersion"] = mb_out.get("mean_dispersion", 0.0)
-        out["mem_trigger_rate"]    = mb_out.get("trigger_rate", 0.0)
-        out["mem_theta_crit"]      = mb_out.get("theta_crit", MEMB_THETA_CRIT)
+        out["mem_mean_dispersion"] = torch.tensor(mb_out.get("mean_dispersion", 0.0), device=idx.device, dtype=torch.float32)
+        out["mem_trigger_rate"]    = torch.tensor(mb_out.get("trigger_rate", 0.0), device=idx.device, dtype=torch.float32)
+        out["mem_theta_crit"]      = torch.tensor(mb_out.get("theta_crit", MEMB_THETA_CRIT), device=idx.device, dtype=torch.float32)
         return out
 
 
